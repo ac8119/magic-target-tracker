@@ -30,7 +30,7 @@ FIDUCIAL dict in explorer.py) over a full MAGIC catalog with linked panels
 within 300 kpc and already-observed stars overplotted, distance-modulus
 histogram, [Fe/H] vs uncertainty, a filtered-target table), LMC/SMC
 excision circles, and headline counts split by ledger category (observed
-by us vs literature-known, 2" match; a checkbox controls whether
+by us vs literature-known, 1" match; a checkbox controls whether
 literature counts as observed). LVDB markers appear only where the
 filtered stars actually are (2 deg occupancy pixels). A "Check SIMBAD"
 button cross-matches the filtered set (<=50k rows) against SIMBAD via

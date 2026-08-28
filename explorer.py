@@ -8,8 +8,8 @@ Data flow
   2. First use converts it to a column-pruned float32 Parquet cache in
      data/explorer_cache/ (keyed by filename + mtime + ledger mtime + schema),
      precomputing Galactic l/b, angular separations from the LMC/SMC centers,
-     and a category-aware ledger cross-match (2", same tolerance as the app's
-     checker) against data/master_exclusion.csv: obs_cat = observed-by-us
+     and a category-aware ledger cross-match (1", the MAGIC pipeline
+     convention) against data/master_exclusion.csv: obs_cat = observed-by-us
      category (MAGIC/nonMAGIC Magellan, GMOS; beats literature) and lit_known
      = Literature match. Build from the command line with:
      python3 explorer.py <catalog.fits>
@@ -51,7 +51,9 @@ LVDB_DWARF_FILES = ["dwarf_mw.csv"]
 LVDB_CLUSTER_FILES = ["gc_harris.csv", "gc_mw_new.csv", "gc_dwarf_hosted.csv"]
 LVDB_MAX_DIST_KPC = 300.0     # drop local-volume systems beyond the MW halo
 
-MATCH_RADIUS_ARCSEC = 2.0        # ledger cross-match, same as app default
+MATCH_RADIUS_ARCSEC = 1.0        # ledger cross-match — the 1" MAGIC pipeline
+                                 # convention (make_targets.py, SIMBAD query);
+                                 # the app's interactive checker stays at 2"
 OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "GMOS")
 SIMBAD_RADIUS_ARCSEC = 1.0       # CDS X-Match radius (make_targets.py convention)
 SIMBAD_MAX_ROWS = 50_000         # refuse to upload more rows than this to CDS
@@ -60,7 +62,7 @@ LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
