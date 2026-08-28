@@ -48,7 +48,8 @@ syn = pd.DataFrame({
     "mag_g":    [17.0, 18.0, 16.0, 18.4, 19.5, 17.5],
     "star_class": pd.Categorical(["RGB", "MS", "ambiguous", "RGB", "MS", "RGB"]),
     "sep_lmc":  [10.0, 2.0, 8.0, 20.0, 1.0, 30.0],
-    "observed": [True, False, False, True, False, False],
+    "obs_cat":  ["MAGIC_Magellan", "", "", "GMOS", "", ""],
+    "lit_known": [True, False, False, False, False, True],
 })
 cuts = [
     {"col": "feh", "kind": "range", "value": (-4.0, -2.5), "enabled": True},
@@ -61,8 +62,13 @@ mask = explorer.apply_cuts(syn, cuts)
 # rows 0,3,5 are RGB with feh in range, ebv<=0.1, outside the LMC circle;
 # row 2 has NaN feh and must fail the enabled range cut
 assert mask.tolist() == [True, False, False, True, False, True], mask.tolist()
-m = explorer.metrics(syn, mask)
-assert m == {"selected": 3, "observed": 2, "remaining": 1}, m
+# category split: row 0 observed by us (and lit — observation wins),
+# row 3 observed by us, row 5 literature-only
+m = explorer.metrics(syn, mask, lit_is_observed=True)
+assert m == {"selected": 3, "observed_us": 2, "literature": 1,
+             "remaining": 0}, m
+m = explorer.metrics(syn, mask, lit_is_observed=False)
+assert m["remaining"] == 1, m
 # disabled cuts must filter nothing
 for c in cuts:
     c["enabled"] = False
@@ -79,7 +85,38 @@ keep = explorer.occupied(stars_ra, stars_dec, m_ra, m_dec)
 # markers 2, 3: nowhere near any star
 assert keep.tolist() == [True, True, False, False], keep.tolist()
 assert not explorer.occupied(np.array([]), np.array([]), m_ra, m_dec).any()
-print("OK  explorer apply_cuts/metrics + LVDB occupancy on synthetic data")
+
+# classify_against_ledger on a synthetic ledger: an observation within 2"
+# sets its category and beats a literature entry at the same position
+ledger = pd.DataFrame({
+    "ra":       [10.0, 10.0, 20.0],
+    "dec":      [-1.0, -1.0, -2.0],
+    "category": ["MAGIC_Magellan", "Literature", "Literature"]})
+oc, lk = explorer.classify_against_ledger(
+    np.array([10.0, 20.0, 30.0]), np.array([-1.0, -2.0, -3.0]), ledger)
+assert oc.tolist() == ["MAGIC_Magellan", "", ""], oc.tolist()
+assert lk.tolist() == [True, True, False], lk.tolist()
+
+# SIMBAD path with a stubbed X-Match (no network) + persistent-cache roundtrip
+def fake_xmatch(ra, dec, radius_arcsec=1.0):
+    return pd.DataFrame({"idx": [1], "simbad_main_id": ["HD 1"],
+                         "simbad_main_type": ["Star"],
+                         "simbad_sep_arcsec": [0.3]})
+sim = explorer.merge_simbad(syn, mask, xmatch_fn=fake_xmatch)
+# filtered rows are positions 0,3,5 -> local idx 1 is df row 3
+assert sim.index.tolist() == [3] and sim.iloc[0]["simbad_main_id"] == "HD 1"
+import tempfile
+_orig = explorer.SIMBAD_CACHE_CSV
+explorer.SIMBAD_CACHE_CSV = os.path.join(tempfile.mkdtemp(), "simbad_cache.csv")
+try:
+    explorer.append_simbad_cache(syn, sim)
+    explorer.append_simbad_cache(syn, sim)          # idempotent
+    back = explorer.load_simbad_cache(syn)
+    assert back.index.tolist() == [3], back
+    assert back.iloc[0]["simbad_main_id"] == "HD 1"
+finally:
+    explorer.SIMBAD_CACHE_CSV = _orig
+print("OK  explorer cuts/metrics, category split, occupancy, SIMBAD stub")
 
 # ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)
@@ -114,7 +151,8 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     radio.set_value("Target explorer").run()
     assert not at2.exception, at2.exception
     em = {m.label: m.value for m in at2.metric}
-    assert "Passing cuts" in em and "Already observed" in em, em
+    assert "Passing cuts" in em and "Observed by us" in em, em
+    assert "Literature-known" in em and "In SIMBAD" in em, em
     print(f"OK  app 'Target explorer' page renders: {em}")
 
     # exactly one population control (radio), no star_class multiselect
@@ -140,14 +178,17 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
         kind = "min" if col.startswith("sep_") else (
             "range" if isinstance(val, tuple) else "max")
         fid.append({"col": col, "kind": kind, "value": val, "enabled": True})
-    want = explorer.metrics(cat, explorer.apply_cuts(cat, fid))
+    want = explorer.metrics(cat, explorer.apply_cuts(cat, fid),
+                            lit_is_observed=True)
 
     fbtn = next(b for b in at2.button if b.label == "Fiducial cuts")
     fbtn.click().run()
     assert not at2.exception, at2.exception
     em2 = {m.label: m.value for m in at2.metric}
     assert em2["Passing cuts"] == f"{want['selected']:,}", (em2, want)
-    assert em2["Already observed"] == f"{want['observed']:,}", (em2, want)
+    assert em2["Observed by us"] == f"{want['observed_us']:,}", (em2, want)
+    assert em2["Literature-known"] == f"{want['literature']:,}", (em2, want)
+    assert em2["Remaining to observe"] == f"{want['remaining']:,}", (em2, want)
     print(f"OK  Fiducial preset applies correctly: {em2}")
 
     # Clear all disables every cut again

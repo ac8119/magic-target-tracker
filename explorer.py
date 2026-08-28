@@ -8,9 +8,11 @@ Data flow
   2. First use converts it to a column-pruned float32 Parquet cache in
      data/explorer_cache/ (keyed by filename + mtime + ledger mtime + schema),
      precomputing Galactic l/b, angular separations from the LMC/SMC centers,
-     and an `observed` flag = 2" cross-match against data/master_exclusion.csv
-     (the tracker's ledger, same tolerance as the app's checker). Build it from
-     the command line with:  python3 explorer.py <catalog.fits>
+     and a category-aware ledger cross-match (2", same tolerance as the app's
+     checker) against data/master_exclusion.csv: obs_cat = observed-by-us
+     category (MAGIC/nonMAGIC Magellan, GMOS; beats literature) and lit_known
+     = Literature match. Build from the command line with:
+     python3 explorer.py <catalog.fits>
   3. Every widget change re-filters the FULL cached table with numpy boolean
      masks; the headline metrics always come from the full filtered set.
      Only the display decimates: scatter layers switch to full-set 2D
@@ -50,11 +52,15 @@ LVDB_CLUSTER_FILES = ["gc_harris.csv", "gc_mw_new.csv", "gc_dwarf_hosted.csv"]
 LVDB_MAX_DIST_KPC = 300.0     # drop local-volume systems beyond the MW halo
 
 MATCH_RADIUS_ARCSEC = 2.0        # ledger cross-match, same as app default
+OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "GMOS")
+SIMBAD_RADIUS_ARCSEC = 1.0       # CDS X-Match radius (make_targets.py convention)
+SIMBAD_MAX_ROWS = 50_000         # refuse to upload more rows than this to CDS
+SIMBAD_CACHE_CSV = os.path.join(APP_DIR, "data", "simbad_cache.csv")
 LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
@@ -142,18 +148,41 @@ def _unit_vectors(ra_deg, dec_deg):
     return np.column_stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
 
 
+def classify_against_ledger(ra, dec, ledger, radius_arcsec=MATCH_RADIUS_ARCSEC):
+    """Category-aware ledger cross-match at radius_arcsec.
+
+    Returns (obs_cat, lit_known): obs_cat is the OBSERVED_CATEGORIES category
+    of the nearest observation within the radius ("" if none — an observation
+    always beats a literature entry), lit_known flags a Literature entry
+    within the radius.
+    """
+    from scipy.spatial import cKDTree
+    chord = 2 * np.sin(np.radians(radius_arcsec / 3600.0) / 2)
+    xyz = _unit_vectors(ra, dec)
+    obs_cat = np.full(len(xyz), "", dtype=object)
+    lit_known = np.zeros(len(xyz), dtype=bool)
+    obs = ledger[ledger["category"].isin(OBSERVED_CATEGORIES)]
+    if len(obs):
+        d, i = cKDTree(_unit_vectors(obs["ra"].values, obs["dec"].values)).query(
+            xyz, k=1, distance_upper_bound=chord)
+        hit = d <= chord
+        obs_cat[hit] = obs["category"].values[np.clip(i[hit], 0, len(obs) - 1)]
+    lit = ledger[ledger["category"] == "Literature"]
+    if len(lit):
+        d, _ = cKDTree(_unit_vectors(lit["ra"].values, lit["dec"].values)).query(
+            xyz, k=1, distance_upper_bound=chord)
+        lit_known = d <= chord
+    return obs_cat, lit_known
+
+
 def build_cache(cat_path, progress=None):
     """Convert one catalog to the pruned Parquet cache + metadata sidecar."""
     from astropy.coordinates import SkyCoord
     from astropy.io import fits
     from astropy import units as u
-    from scipy.spatial import cKDTree
 
-    tree = None
-    if os.path.exists(EXCLUSION_CSV):
-        led = pd.read_csv(EXCLUSION_CSV)
-        tree = cKDTree(_unit_vectors(led["ra"].values, led["dec"].values))
-    chord = 2 * np.sin(np.radians(MATCH_RADIUS_ARCSEC / 3600.0) / 2)
+    ledger = (pd.read_csv(EXCLUSION_CSV) if os.path.exists(EXCLUSION_CSV)
+              else pd.DataFrame(columns=["ra", "dec", "category"]))
 
     frames, missing = [], []
     with fits.open(cat_path, memmap=True) as hdul:
@@ -194,18 +223,16 @@ def build_cache(cat_path, progress=None):
             cols["b"] = gal.b.deg.astype(np.float32)
             cols["sep_lmc"] = _angsep_deg(LMC[0], LMC[1], ra64, dec64).astype(np.float32)
             cols["sep_smc"] = _angsep_deg(SMC[0], SMC[1], ra64, dec64).astype(np.float32)
-            if tree is not None:
-                d, _ = tree.query(_unit_vectors(ra64, dec64), k=1,
-                                  distance_upper_bound=chord)
-                cols["observed"] = d <= chord
-            else:
-                cols["observed"] = np.zeros(len(rec), bool)
+            obs_cat, lit_known = classify_against_ledger(ra64, dec64, ledger)
+            cols["obs_cat"] = obs_cat
+            cols["lit_known"] = lit_known
             frames.append(pd.DataFrame(cols))
             if progress:
                 progress(min(1.0, (start + len(rec)) / n))
 
     df = pd.concat(frames, ignore_index=True)
     df["star_class"] = df["star_class"].astype("category")
+    df["obs_cat"] = df["obs_cat"].astype("category")
 
     def rng(col, lo_q=0.5, hi_q=99.5):
         v = df[col].values
@@ -216,7 +243,8 @@ def build_cache(cat_path, progress=None):
 
     meta = {
         "catalog": cat_path, "n_rows": len(df),
-        "n_observed": int(df["observed"].sum()),
+        "n_observed_us": int((df["obs_cat"] != "").sum()),
+        "n_lit_known": int(df["lit_known"].sum()),
         "missing": missing,
         "star_classes": df["star_class"].value_counts().to_dict(),
         "ranges": {c: rng(c) for c in
@@ -258,11 +286,19 @@ def apply_cuts(df, cuts):
     return mask
 
 
-def metrics(df, mask):
-    """Headline numbers, always from the FULL filtered set."""
+def metrics(df, mask, lit_is_observed=True):
+    """Headline numbers, always from the FULL filtered set.
+
+    observed_us = the OBSERVED_CATEGORIES ledger entries (our observations);
+    literature  = Literature-only matches (an observation beats literature);
+    remaining excludes literature-known stars only if lit_is_observed.
+    """
     n = int(mask.sum())
-    n_obs = int((mask & df["observed"].to_numpy()).sum())
-    return {"selected": n, "observed": n_obs, "remaining": n - n_obs}
+    obs_us = mask & (np.asarray(df["obs_cat"]) != "")
+    lit = mask & np.asarray(df["lit_known"]) & ~obs_us
+    n_obs, n_lit = int(obs_us.sum()), int(lit.sum())
+    return {"selected": n, "observed_us": n_obs, "literature": n_lit,
+            "remaining": n - n_obs - (n_lit if lit_is_observed else 0)}
 
 
 # ──────────────────────── LVDB overlays ────────────────────────
@@ -328,6 +364,85 @@ def load_lvdb():
         return (pd.concat(frames, ignore_index=True)
                 if frames else pd.DataFrame(columns=["name", "ra", "dec"]))
     return gather(LVDB_DWARF_FILES), gather(LVDB_CLUSTER_FILES)
+
+
+# ──────────────────────── SIMBAD cross-match ────────────────────────
+# On-demand only (button press): the filtered stars are uploaded to the CDS
+# X-Match service and matched against SIMBAD at SIMBAD_RADIUS_ARCSEC — the
+# same service + radius scripts/make_targets.py uses via stilts cdsskymatch.
+# Implementation uses astroquery.xmatch (already installed; pure Python).
+
+SIMBAD_COLS = ["simbad_main_id", "simbad_main_type", "simbad_sep_arcsec"]
+
+
+def run_simbad_xmatch(ra, dec, radius_arcsec=SIMBAD_RADIUS_ARCSEC):
+    """Query CDS X-Match against SIMBAD. Returns a DataFrame with columns
+    idx (position into the input arrays) + SIMBAD_COLS, best match per star."""
+    from astropy import units as u
+    from astropy.table import Table
+    from astroquery.xmatch import XMatch
+    t = Table({"idx": np.arange(len(ra)),
+               "ra": np.asarray(ra, float), "dec": np.asarray(dec, float)})
+    res = XMatch.query(cat1=t, cat2="simbad",
+                       max_distance=radius_arcsec * u.arcsec,
+                       colRA1="ra", colDec1="dec")
+    if len(res) == 0:
+        return pd.DataFrame(columns=["idx"] + SIMBAD_COLS)
+    r = res.to_pandas().sort_values("angDist").drop_duplicates("idx")
+    return pd.DataFrame({
+        "idx": r["idx"].astype(int).values,
+        "simbad_main_id": r["main_id"].astype(str).values,
+        "simbad_main_type": r["main_type"].astype(str).values,
+        "simbad_sep_arcsec": r["angDist"].round(2).values})
+
+
+def merge_simbad(df, mask, xmatch_fn=run_simbad_xmatch):
+    """Cross-match the filtered rows of df against SIMBAD.
+
+    Returns a DataFrame with SIMBAD_COLS indexed by df row position (matches
+    only). xmatch_fn is injectable so tests never touch the network.
+    """
+    idx = np.flatnonzero(mask)
+    res = xmatch_fn(df["ra"].to_numpy()[idx].astype(float),
+                    df["dec"].to_numpy()[idx].astype(float))
+    out = res[SIMBAD_COLS].copy()
+    out.index = idx[res["idx"].to_numpy()]
+    return out
+
+
+def _coord_key(ra, dec):
+    """Integer key from coordinates rounded to 1e-5 deg (0.036 arcsec)."""
+    r = np.round(np.mod(np.asarray(ra, float), 360.0) * 1e5).astype(np.int64)
+    d = np.round((np.asarray(dec, float) + 90.0) * 1e5).astype(np.int64)
+    return r * 100_000_000 + d
+
+
+def load_simbad_cache(df):
+    """Positive SIMBAD matches persisted from earlier sessions, joined back to
+    df rows by rounded coordinates. Returns same shape as merge_simbad."""
+    if not os.path.exists(SIMBAD_CACHE_CSV):
+        return pd.DataFrame(columns=SIMBAD_COLS)
+    cache = (pd.read_csv(SIMBAD_CACHE_CSV)
+             .drop_duplicates("coord_key").set_index("coord_key"))
+    keys = _coord_key(df["ra"].to_numpy(), df["dec"].to_numpy())
+    pos = np.flatnonzero(np.isin(keys, cache.index.to_numpy()))
+    out = cache.loc[keys[pos], SIMBAD_COLS].copy()
+    out.index = pos
+    return out
+
+
+def append_simbad_cache(df, matches):
+    """Persist positive matches (keyed by rounded coordinates, git-ignored)."""
+    if not len(matches):
+        return
+    new = matches.copy()
+    new.insert(0, "coord_key", _coord_key(df["ra"].to_numpy()[matches.index],
+                                          df["dec"].to_numpy()[matches.index]))
+    if os.path.exists(SIMBAD_CACHE_CSV):
+        old = pd.read_csv(SIMBAD_CACHE_CSV)
+        new = pd.concat([old, new[~new["coord_key"].isin(old["coord_key"])]],
+                        ignore_index=True)
+    new.to_csv(SIMBAD_CACHE_CSV, index=False)
 
 
 # ═══════════════════════════ Streamlit page ═══════════════════════════
@@ -540,15 +655,61 @@ def render():
             add(on, col, "min", r)
 
     mask = apply_cuts(df, cuts)
-    m = metrics(df, mask)
+
+    skey = key + ":simbad"
+    if skey not in st.session_state:
+        st.session_state[skey] = load_simbad_cache(df)
+        st.session_state[skey + ":queried"] = set()
 
     with view:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("In catalog", f"{len(df):,}")
-        c2.metric("Passing cuts", f"{m['selected']:,}")
-        c3.metric("Already observed", f"{m['observed']:,}")
-        c4.metric("Remaining to observe", f"{m['remaining']:,}")
-        ui = {"st": st, "key": key}
+        mrow = st.container()   # metrics render last (fresh after SIMBAD click)
+        lit_obs = st.checkbox("count literature-known stars as already observed",
+                              value=True, key=key + ":litobs")
+        m = metrics(df, mask, lit_is_observed=lit_obs)
+
+        # on-demand SIMBAD cross-match — only ever queries on button press
+        n_sel = m["selected"]
+        over = n_sel > SIMBAD_MAX_ROWS
+        if st.button(f"Check SIMBAD ({n_sel:,} filtered stars, "
+                     f"{SIMBAD_RADIUS_ARCSEC:.0f} arcsec CDS X-Match)",
+                     disabled=(n_sel == 0 or over)):
+            import hashlib
+            h = hashlib.md5(np.flatnonzero(mask).tobytes()).hexdigest()
+            if h in st.session_state[skey + ":queried"]:
+                st.info("This exact selection was already checked this session.")
+            else:
+                try:
+                    with st.spinner("Querying CDS X-Match against SIMBAD ..."):
+                        res = merge_simbad(df, mask)
+                    append_simbad_cache(df, res)
+                    sim = st.session_state[skey]
+                    st.session_state[skey] = pd.concat(
+                        [sim[~sim.index.isin(res.index)], res]).sort_index()
+                    st.session_state[skey + ":queried"].add(h)
+                    st.success(f"{len(res):,} of {n_sel:,} filtered stars "
+                               f"are in SIMBAD.")
+                except Exception as e:
+                    st.warning(f"SIMBAD X-Match failed (offline or CDS "
+                               f"service error) — the app keeps working: {e}")
+        if over:
+            st.caption(f"SIMBAD check disabled: {n_sel:,} rows exceed the "
+                       f"{SIMBAD_MAX_ROWS:,} upload cap — tighten the cuts.")
+
+        sim = st.session_state[skey]
+        sim_idx = sim.index.to_numpy()
+        n_simbad = int(mask[sim_idx].sum()) if len(sim_idx) else 0
+        with mrow:
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("In catalog", f"{len(df):,}")
+            c2.metric("Passing cuts", f"{m['selected']:,}")
+            c3.metric("Observed by us", f"{m['observed_us']:,}")
+            c4.metric("Literature-known", f"{m['literature']:,}")
+            c5.metric("Remaining to observe", f"{m['remaining']:,}")
+            c6.metric("In SIMBAD", f"{n_simbad:,}",
+                      help="From this session's checks plus the persistent "
+                           "cache; run 'Check SIMBAD' to update.")
+
+        ui = {"st": st, "key": key, "sim": sim}
         for title, fn in PANELS:
             st.subheader(title)
             fn(df, mask, ui)
@@ -585,12 +746,24 @@ def panel_sky(df, mask, ui):
     fig = go.Figure()
     if len(x):
         fig.add_trace(_density_or_scatter(go, x, y, "targets"))
-    obs = mask & df["observed"].to_numpy()
-    if obs.any():
-        fig.add_trace(go.Scattergl(
-            x=df[xc].to_numpy()[obs], y=df[yc].to_numpy()[obs], mode="markers",
-            name="already observed",
-            marker=dict(symbol="x", size=7, color="#e45756")))
+    obs_us = mask & (np.asarray(df["obs_cat"]) != "")
+    lit = mask & np.asarray(df["lit_known"]) & ~obs_us
+    sim_sel = np.zeros(len(df), dtype=bool)
+    sim_index = ui["sim"].index.to_numpy()
+    if len(sim_index):
+        sim_sel[sim_index] = True
+        sim_sel &= mask
+    for sel, name, marker in (
+            (obs_us, "observed by us",
+             dict(symbol="x", size=7, color="#e45756")),
+            (lit, "literature-known",
+             dict(symbol="circle-open", size=7, color="#f58518")),
+            (sim_sel, "in SIMBAD",
+             dict(symbol="diamond-open", size=8, color="#b279a2"))):
+        if sel.any():
+            fig.add_trace(go.Scattergl(
+                x=df[xc].to_numpy()[sel], y=df[yc].to_numpy()[sel],
+                mode="markers", name=name, marker=marker))
 
     occ = occupancy_grid(df["ra"].to_numpy()[mask], df["dec"].to_numpy()[mask])
     dwarfs, clusters = load_lvdb()
@@ -635,12 +808,12 @@ def panel_dmod(df, mask, ui):
         cnt, edges = np.histogram(v, bins=120)
         fig.add_trace(go.Bar(x=0.5 * (edges[:-1] + edges[1:]), y=cnt,
                              name="targets", marker_color="#4c78a8"))
-        o = df["dmod"].to_numpy()[mask & df["observed"].to_numpy()]
+        o = df["dmod"].to_numpy()[mask & (np.asarray(df["obs_cat"]) != "")]
         o = o[np.isfinite(o)]
         if len(o):
             cnt2, _ = np.histogram(o, bins=edges)
             fig.add_trace(go.Bar(x=0.5 * (edges[:-1] + edges[1:]), y=cnt2,
-                                 name="already observed", marker_color="#e45756"))
+                                 name="observed by us", marker_color="#e45756"))
         fig.update_layout(barmode="overlay", height=340,
                           margin=dict(l=10, r=10, t=10, b=10),
                           xaxis_title="distance modulus (per-class)",
@@ -661,12 +834,12 @@ def panel_feh(df, mask, ui):
     if ok.any():
         fig.add_trace(_density_or_scatter(go, x[ok], y[ok], "targets",
                                           nbins=(240, 160)))
-        obs = mask & df["observed"].to_numpy()
+        obs = mask & (np.asarray(df["obs_cat"]) != "")
         xo, yo = df["feh"].to_numpy()[obs], df["e_feh"].to_numpy()[obs]
         oko = np.isfinite(xo) & np.isfinite(yo)
         if oko.any():
             fig.add_trace(go.Scattergl(
-                x=xo[oko], y=yo[oko], mode="markers", name="already observed",
+                x=xo[oko], y=yo[oko], mode="markers", name="observed by us",
                 marker=dict(symbol="x", size=7, color="#e45756")))
         fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
                           xaxis_title="[Fe/H] (per-class)",
@@ -676,10 +849,35 @@ def panel_feh(df, mask, ui):
         st.caption("No finite [Fe/H] values in the current selection.")
 
 
+def panel_table(df, mask, ui):
+    st = ui["st"]
+    n = int(mask.sum())
+    if n > SIMBAD_MAX_ROWS:
+        st.caption(f"{n:,} rows — tighten the cuts below {SIMBAD_MAX_ROWS:,} "
+                   "to browse or download the target table.")
+        return
+    cols = [c for c in ("ra", "dec", "star_class", "feh", "e_feh", "dmod",
+                        "gi0", "mag_g", "pmra", "pmdec", "ebv",
+                        "obs_cat", "lit_known") if c in df.columns]
+    tab = df.loc[mask, cols].copy()
+    for c in SIMBAD_COLS:   # empty until a SIMBAD query has run
+        tab[c] = ""
+    hit = ui["sim"].index.intersection(tab.index)
+    if len(hit):
+        tab.loc[hit, SIMBAD_COLS] = ui["sim"].loc[hit, SIMBAD_COLS].values
+    st.dataframe(tab.head(5000), use_container_width=True)
+    if n > 5000:
+        st.caption("showing the first 5,000 rows — the download has all of them")
+    st.download_button("Download filtered targets CSV",
+                       tab.to_csv(index=False).encode(),
+                       "explorer_targets.csv", "text/csv")
+
+
 PANELS = [
     ("On-sky", panel_sky),
     ("Distance modulus", panel_dmod),
     ("[Fe/H] vs its uncertainty", panel_feh),
+    ("Filtered targets", panel_table),
 ]
 
 

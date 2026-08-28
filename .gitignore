@@ -9,3 +9,6 @@ data/target_runs.csv
 
 # explorer parquet caches (derived from local catalogs - never commit coordinates)
 data/explorer_cache/
+
+# on-demand SIMBAD X-Match results (coordinates - public repo, keep local)
+data/simbad_cache.csv

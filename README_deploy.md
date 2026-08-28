@@ -28,9 +28,14 @@ Interactive cuts (sliders + typed min/max boxes, two-way synced; a
 FIDUCIAL dict in explorer.py) over a full MAGIC catalog with linked panels
 (on-sky in RA/Dec or Galactic l/b with LVDB dwarfs + MW star clusters
 within 300 kpc and already-observed stars overplotted, distance-modulus
-histogram, [Fe/H] vs uncertainty), LMC/SMC excision circles, and headline
-counts of how many selected stars are already observed (2" match against
-the ledger).
+histogram, [Fe/H] vs uncertainty, a filtered-target table), LMC/SMC
+excision circles, and headline counts split by ledger category (observed
+by us vs literature-known, 2" match; a checkbox controls whether
+literature counts as observed). LVDB markers appear only where the
+filtered stars actually are (2 deg occupancy pixels). A "Check SIMBAD"
+button cross-matches the filtered set (<=50k rows) against SIMBAD via
+the CDS X-Match at 1" — on demand only, cached per session and in the
+git-ignored data/simbad_cache.csv.
 ```bash
 python3 explorer.py /path/to/catalog.fits   # optional: prebuild the Parquet cache
 streamlit run app.py                        # sidebar page: "Target explorer"
