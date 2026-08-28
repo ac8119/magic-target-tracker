@@ -23,6 +23,12 @@ A password-protected Streamlit app that lets anyone on the team:
 - `secrets.toml.example` — template for logins + optional Google Sheet queue
 
 ## Target-selection explorer (workstation)
+Both workstation pages (Target explorer, Follow-up progress) appear only
+when the local secrets set `[features] explorer = true` AND their data
+exists. The flag is default-closed — do **not** add it to the cloud
+deploy's secrets, so those pages stay internal even if data files are
+ever committed by accident.
+
 Interactive cuts (sliders + typed min/max boxes, two-way synced; a
 "Fiducial cuts" button applies the standard giant selection from the
 FIDUCIAL dict in explorer.py) over a full MAGIC catalog with linked panels

@@ -134,6 +134,7 @@ print("OK  explorer cuts/metrics, category split, occupancy, SIMBAD stub, "
 # ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)
 at.secrets["credentials"] = {"smoketest": "pw"}
+at.secrets["features"] = {"explorer": True}
 at.session_state["user"] = "smoketest"
 at.run()
 assert not at.exception, at.exception
@@ -157,6 +158,7 @@ import glob as _glob
 if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.parquet")):
     at2 = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=300)
     at2.secrets["credentials"] = {"smoketest": "pw"}
+    at2.secrets["features"] = {"explorer": True}
     at2.session_state["user"] = "smoketest"
     at2.run()
     radio = at2.sidebar.radio[0]
@@ -181,7 +183,10 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert not any("magerr" in k for k in keys), "magerr widgets should be gone"
 
     # the Fiducial preset must reproduce apply_cuts with the FIDUCIAL values
-    pqf = sorted(_glob.glob(os.path.join(explorer.CACHE_DIR, "*.parquet")))[0]
+    # (derive the cache path exactly as the app does — a stale cache from an
+    # older schema may coexist in CACHE_DIR, e.g. from a running app session)
+    pqf, _ = explorer.cache_paths(explorer.find_catalogs()[explorer.DEFAULT_CATALOG])
+    assert os.path.exists(pqf), f"cache missing for default catalog: {pqf}"
     cat = pd.read_parquet(pqf)
     fid = [{"col": "star_class", "kind": "isin",
             "value": [explorer.FIDUCIAL["population"]], "enabled": True}]
@@ -239,6 +244,19 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     details = " ".join(str(m.value) for m in at2.markdown)
     assert "SIMBAD: FAKE 2" in details, "detail line missing"
     print("OK  click-selection state puts the star first with a detail line")
+
+    # feature flag is default-closed: without it neither workstation page
+    # is offered, with it both are (data exists on this machine)
+    at4 = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=300)
+    at4.secrets["credentials"] = {"smoketest": "pw"}
+    at4.secrets["features"] = {}          # flag absent = hidden
+    at4.session_state["user"] = "smoketest"
+    at4.run()
+    opts = list(at4.sidebar.radio[0].options)
+    assert "Target explorer" not in opts and "Follow-up progress" not in opts, opts
+    both = list(at2.sidebar.radio[0].options)
+    assert "Target explorer" in both and "Follow-up progress" in both, both
+    print("OK  feature flag: pages hidden without it, present with it")
 
     # Clear all disables every cut again
     next(b for b in at2.button if b.label == "Clear all").click().run()

@@ -63,6 +63,16 @@ def check_login():
     return False
 
 
+def feature_enabled(name):
+    """Workstation-only feature flag: st.secrets['features'][name].
+    A missing section or key means DISABLED (default-closed), so the cloud
+    deploy hides flagged pages even if their data files ever end up there."""
+    try:
+        return bool(st.secrets["features"][name])
+    except (KeyError, FileNotFoundError):
+        return False
+
+
 # ──────────────────────── coordinate utils ────────────────────────
 def parse_coord(text):
     """Parse 'ra dec' in decimal degrees or HMS/DMS (colon- or space-separated).
@@ -349,9 +359,12 @@ if check_login():
     excl = load_exclusion()
     queue = load_queue()
     prog = load_progress()
-    try:  # workstation-only page: needs local catalogs (+ astropy/pyarrow/plotly)
+    # workstation-only pages: gated on the [features] explorer flag in the
+    # local secrets AND on their data existing (cloud deploy: flag unset)
+    workstation = feature_enabled("explorer")
+    try:  # the explorer additionally needs local catalogs (+ astropy/pyarrow)
         import explorer
-        explorer_ok = bool(explorer.find_catalogs())
+        explorer_ok = workstation and bool(explorer.find_catalogs())
     except ImportError:
         explorer_ok = False
     st.sidebar.title("🔭 MAGIC Target Tracker")
@@ -359,7 +372,7 @@ if check_login():
     pages = ["Check targets", "Queue", "Browse observed"]
     if explorer_ok:
         pages.append("Target explorer")
-    if prog is not None:
+    if workstation and prog is not None:
         pages.append("Follow-up progress")
     page = st.sidebar.radio("Page", pages)
     st.sidebar.markdown("---")
