@@ -373,6 +373,7 @@ def load_lvdb():
 # Implementation uses astroquery.xmatch (already installed; pure Python).
 
 SIMBAD_COLS = ["simbad_main_id", "simbad_main_type", "simbad_sep_arcsec"]
+SIMBAD_COLOR = "#b279a2"   # violet used for every "In SIMBAD" overlay
 
 
 def run_simbad_xmatch(ra, dec, radius_arcsec=SIMBAD_RADIUS_ARCSEC):
@@ -696,8 +697,11 @@ def render():
                        f"{SIMBAD_MAX_ROWS:,} upload cap — tighten the cuts.")
 
         sim = st.session_state[skey]
-        sim_idx = sim.index.to_numpy()
-        n_simbad = int(mask[sim_idx].sum()) if len(sim_idx) else 0
+        sim_mask = np.zeros(len(df), dtype=bool)
+        if len(sim.index):
+            sim_mask[sim.index.to_numpy()] = True
+        sim_mask &= mask
+        n_simbad = int(sim_mask.sum())
         with mrow:
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("In catalog", f"{len(df):,}")
@@ -709,7 +713,7 @@ def render():
                       help="From this session's checks plus the persistent "
                            "cache; run 'Check SIMBAD' to update.")
 
-        ui = {"st": st, "key": key, "sim": sim}
+        ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask}
         for title, fn in PANELS:
             st.subheader(title)
             fn(df, mask, ui)
@@ -717,7 +721,12 @@ def render():
 
 # ──────────────────────── linked panels ────────────────────────
 # Each panel: fn(df, mask, ui) — df is the FULL table, mask the current cuts.
-# Register new panels in PANELS below; they automatically share the same cuts.
+# ui carries the shared overlay state, so every registered panel gets it for
+# free: ui["sim_mask"] is a full-length boolean array of the SIMBAD-matched
+# stars ALREADY intersected with the filter mask (all-False until a SIMBAD
+# query has run — panels then show nothing extra), styled SIMBAD_COLOR with
+# the legend entry "In SIMBAD"; ui["sim"] is the match table for row detail.
+# Register new panels in PANELS below; they automatically share the cuts.
 
 def _density_or_scatter(fig_go, x, y, name, nbins=(360, 200)):
     """Full-set 2D histogram above SCATTER_MAX, WebGL scatter below."""
@@ -748,18 +757,13 @@ def panel_sky(df, mask, ui):
         fig.add_trace(_density_or_scatter(go, x, y, "targets"))
     obs_us = mask & (np.asarray(df["obs_cat"]) != "")
     lit = mask & np.asarray(df["lit_known"]) & ~obs_us
-    sim_sel = np.zeros(len(df), dtype=bool)
-    sim_index = ui["sim"].index.to_numpy()
-    if len(sim_index):
-        sim_sel[sim_index] = True
-        sim_sel &= mask
     for sel, name, marker in (
             (obs_us, "observed by us",
              dict(symbol="x", size=7, color="#e45756")),
             (lit, "literature-known",
              dict(symbol="circle-open", size=7, color="#f58518")),
-            (sim_sel, "in SIMBAD",
-             dict(symbol="diamond-open", size=8, color="#b279a2"))):
+            (ui["sim_mask"], "In SIMBAD",
+             dict(symbol="diamond-open", size=8, color=SIMBAD_COLOR))):
         if sel.any():
             fig.add_trace(go.Scattergl(
                 x=df[xc].to_numpy()[sel], y=df[yc].to_numpy()[sel],
@@ -814,6 +818,15 @@ def panel_dmod(df, mask, ui):
             cnt2, _ = np.histogram(o, bins=edges)
             fig.add_trace(go.Bar(x=0.5 * (edges[:-1] + edges[1:]), y=cnt2,
                                  name="observed by us", marker_color="#e45756"))
+        s = df["dmod"].to_numpy()[ui["sim_mask"]]
+        s = s[np.isfinite(s)]
+        if len(s):
+            cnt3, _ = np.histogram(s, bins=edges)
+            fig.add_trace(go.Scatter(
+                x=0.5 * (edges[:-1] + edges[1:]),
+                y=np.where(cnt3 > 0, cnt3, np.nan),   # gaps instead of log(0)
+                name="In SIMBAD", mode="lines",
+                line=dict(color=SIMBAD_COLOR, width=2, shape="hvh")))
         fig.update_layout(barmode="overlay", height=340,
                           margin=dict(l=10, r=10, t=10, b=10),
                           xaxis_title="distance modulus (per-class)",
@@ -841,6 +854,14 @@ def panel_feh(df, mask, ui):
             fig.add_trace(go.Scattergl(
                 x=xo[oko], y=yo[oko], mode="markers", name="observed by us",
                 marker=dict(symbol="x", size=7, color="#e45756")))
+        sm = ui["sim_mask"]
+        xs, ys = df["feh"].to_numpy()[sm], df["e_feh"].to_numpy()[sm]
+        oks = np.isfinite(xs) & np.isfinite(ys)
+        if oks.any():
+            fig.add_trace(go.Scattergl(
+                x=xs[oks], y=ys[oks], mode="markers", name="In SIMBAD",
+                marker=dict(symbol="diamond-open", size=8,
+                            color=SIMBAD_COLOR)))
         fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
                           xaxis_title="[Fe/H] (per-class)",
                           yaxis_title="σ([Fe/H])")
@@ -860,12 +881,25 @@ def panel_table(df, mask, ui):
                         "gi0", "mag_g", "pmra", "pmdec", "ebv",
                         "obs_cat", "lit_known") if c in df.columns]
     tab = df.loc[mask, cols].copy()
-    for c in SIMBAD_COLS:   # empty until a SIMBAD query has run
-        tab[c] = ""
+    tab["in_simbad"] = np.asarray(ui["sim_mask"])[tab.index]  # sortable
+    # empty until a SIMBAD query has run (sep stays numeric for Arrow/sorting)
+    tab["simbad_main_id"] = ""
+    tab["simbad_main_type"] = ""
+    tab["simbad_sep_arcsec"] = np.nan
     hit = ui["sim"].index.intersection(tab.index)
     if len(hit):
         tab.loc[hit, SIMBAD_COLS] = ui["sim"].loc[hit, SIMBAD_COLS].values
-    st.dataframe(tab.head(5000), use_container_width=True)
+    if st.checkbox("show only SIMBAD matches", key=ui["key"] + ":tab_sim",
+                   disabled=not tab["in_simbad"].any()):
+        tab = tab[tab["in_simbad"]]
+    disp = tab.head(5000)
+    if 0 < len(disp) <= 2000 and disp["in_simbad"].any():
+        # subtle violet row tint — Styler is cheap at this size, skipped above it
+        st.dataframe(disp.style.apply(
+            lambda r: ["background-color: rgba(178,121,162,0.15)" * r["in_simbad"]]
+                      * len(r), axis=1), use_container_width=True)
+    else:
+        st.dataframe(disp, use_container_width=True)
     if n > 5000:
         st.caption("showing the first 5,000 rows — the download has all of them")
     st.download_button("Download filtered targets CSV",

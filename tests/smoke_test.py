@@ -178,18 +178,43 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
         kind = "min" if col.startswith("sep_") else (
             "range" if isinstance(val, tuple) else "max")
         fid.append({"col": col, "kind": kind, "value": val, "enabled": True})
-    want = explorer.metrics(cat, explorer.apply_cuts(cat, fid),
-                            lit_is_observed=True)
+    fid_mask = explorer.apply_cuts(cat, fid)
+    want = explorer.metrics(cat, fid_mask, lit_is_observed=True)
+
+    # seed a stubbed SIMBAD match store (5 fiducial stars) so every panel
+    # must show the "In SIMBAD" overlay after the preset is applied
+    seed_pos = np.flatnonzero(fid_mask)[:5]
+    ekey = os.path.basename(pqf)
+    at2.session_state[f"{ekey}:simbad"] = pd.DataFrame(
+        {"simbad_main_id": [f"FAKE {i}" for i in range(5)],
+         "simbad_main_type": ["Star"] * 5,
+         "simbad_sep_arcsec": [0.1] * 5}, index=seed_pos)
+    at2.session_state[f"{ekey}:simbad:queried"] = set()
 
     fbtn = next(b for b in at2.button if b.label == "Fiducial cuts")
     fbtn.click().run()
     assert not at2.exception, at2.exception
     em2 = {m.label: m.value for m in at2.metric}
+    assert em2["In SIMBAD"] == "5", em2
     assert em2["Passing cuts"] == f"{want['selected']:,}", (em2, want)
     assert em2["Observed by us"] == f"{want['observed_us']:,}", (em2, want)
     assert em2["Literature-known"] == f"{want['literature']:,}", (em2, want)
     assert em2["Remaining to observe"] == f"{want['remaining']:,}", (em2, want)
     print(f"OK  Fiducial preset applies correctly: {em2}")
+
+    # the SIMBAD overlay must propagate to the dmod and e_feh panels
+    def chart_spec(el):
+        p = el.proto
+        spec = getattr(getattr(p, "figure", p), "spec", "")
+        return spec or getattr(p, "spec", "")
+    charts = [chart_spec(el) for el in at2.get("plotly_chart")]
+    assert len(charts) >= 3, f"expected sky/dmod/feh charts, got {len(charts)}"
+    assert "In SIMBAD" in charts[1], "dmod panel lacks the SIMBAD overlay"
+    assert "In SIMBAD" in charts[2], "e_feh panel lacks the SIMBAD overlay"
+    # and the filtered-target table gains a sortable in_simbad column
+    tab = at2.dataframe[0].value
+    assert "in_simbad" in tab.columns and int(tab["in_simbad"].sum()) == 5,         tab.columns.tolist()
+    print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # Clear all disables every cut again
     next(b for b in at2.button if b.label == "Clear all").click().run()
