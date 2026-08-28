@@ -45,6 +45,7 @@ syn = pd.DataFrame({
     "feh":      [-3.0, -2.0, np.nan, -3.5, -1.0, -2.8],
     "e_feh":    [0.2, 0.3, np.nan, 0.1, 0.9, 0.4],
     "ebv":      [0.05, 0.15, 0.02, 0.01, 0.30, 0.08],
+    "mag_g":    [17.0, 18.0, 16.0, 18.4, 19.5, 17.5],
     "star_class": pd.Categorical(["RGB", "MS", "ambiguous", "RGB", "MS", "RGB"]),
     "sep_lmc":  [10.0, 2.0, 8.0, 20.0, 1.0, 30.0],
     "observed": [True, False, False, True, False, False],
@@ -52,6 +53,7 @@ syn = pd.DataFrame({
 cuts = [
     {"col": "feh", "kind": "range", "value": (-4.0, -2.5), "enabled": True},
     {"col": "ebv", "kind": "max", "value": 0.1, "enabled": True},
+    {"col": "mag_g", "kind": "max", "value": 18.5, "enabled": True},
     {"col": "star_class", "kind": "isin", "value": ["RGB"], "enabled": True},
     {"col": "sep_lmc", "kind": "min", "value": 5.0, "enabled": True},
 ]
@@ -102,6 +104,45 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     em = {m.label: m.value for m in at2.metric}
     assert "Passing cuts" in em and "Already observed" in em, em
     print(f"OK  app 'Target explorer' page renders: {em}")
+
+    # exactly one population control (radio), no star_class multiselect
+    pop_radios = [r for r in at2.radio if "Population" in (r.label or "")]
+    assert len(pop_radios) == 1, "expected a single population radio"
+    assert list(pop_radios[0].options) == ["RGB", "MS", "both",
+                                           "include ambiguous"], pop_radios[0].options
+    assert not at2.multiselect, "star_class multiselect should be gone"
+    # every cut has typed number boxes; the depth cut is now mag_psf_g
+    keys = {n.key for n in at2.number_input}
+    assert any(k.endswith(":feh:lo") for k in keys), keys
+    assert any(k.endswith(":mag_g:box") for k in keys), keys
+    assert not any("magerr" in k for k in keys), "magerr widgets should be gone"
+
+    # the Fiducial preset must reproduce apply_cuts with the FIDUCIAL values
+    pqf = sorted(_glob.glob(os.path.join(explorer.CACHE_DIR, "*.parquet")))[0]
+    cat = pd.read_parquet(pqf)
+    fid = [{"col": "star_class", "kind": "isin",
+            "value": [explorer.FIDUCIAL["population"]], "enabled": True}]
+    for col, val in explorer.FIDUCIAL.items():
+        if col == "population":
+            continue
+        kind = "min" if col.startswith("sep_") else (
+            "range" if isinstance(val, tuple) else "max")
+        fid.append({"col": col, "kind": kind, "value": val, "enabled": True})
+    want = explorer.metrics(cat, explorer.apply_cuts(cat, fid))
+
+    fbtn = next(b for b in at2.button if b.label == "Fiducial cuts")
+    fbtn.click().run()
+    assert not at2.exception, at2.exception
+    em2 = {m.label: m.value for m in at2.metric}
+    assert em2["Passing cuts"] == f"{want['selected']:,}", (em2, want)
+    assert em2["Already observed"] == f"{want['observed']:,}", (em2, want)
+    print(f"OK  Fiducial preset applies correctly: {em2}")
+
+    # Clear all disables every cut again
+    next(b for b in at2.button if b.label == "Clear all").click().run()
+    em3 = {m.label: m.value for m in at2.metric}
+    assert em3["Passing cuts"] != em2["Passing cuts"]
+    print(f"OK  Clear all restores the unfiltered view: {em3['Passing cuts']} pass")
 else:
     print("SKIP explorer page render (no catalog/cache on this machine)")
 print("SMOKE TEST PASSED")

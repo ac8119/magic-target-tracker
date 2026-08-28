@@ -47,19 +47,46 @@ LVDB_DIRS = [os.environ.get(
              os.path.join(APP_DIR, "data", "lvdb")]
 LVDB_DWARF_FILES = ["dwarf_mw.csv"]
 LVDB_CLUSTER_FILES = ["gc_harris.csv", "gc_mw_new.csv", "gc_dwarf_hosted.csv"]
+LVDB_MAX_DIST_KPC = 300.0     # drop local-volume systems beyond the MW halo
 
 MATCH_RADIUS_ARCSEC = 2.0        # ledger cross-match, same as app default
 LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
 HARD_BOUNDS = {"pmra": (-30, 30), "pmdec": (-30, 30), "ebv": (0, 1),
                "gi0": (-2, 5), "feh": (-5, 2), "e_feh": (0, 5),
-               "dmod": (0, 25), "magerr_g": (0, 2), "magerr_cahk": (0, 2)}
+               "dmod": (0, 25), "mag_g": (10, 25)}
+
+# ── Fiducial preset ─────────────────────────────────────────────────────
+# One-click "standard MAGIC low-metallicity giant" selection, applied by the
+# [Fiducial cuts] button. EDIT ME as the survey conventions evolve.
+# Provenance: scripts/make_targets.py in magic-low-metallicity-followup —
+#   giants:  |pmra| < 3.5 and |pmdec| < 3.5 mas/yr (its hardcoded giant cut);
+#            its loggs < 4.0 and parallax < 0.4 cuts have no cached column
+#            here, so population = "RGB" (the catalog classification) stands
+#            in for them;
+#   [Fe/H] < -3.0: the "fehm-30" threshold used by nearly every dated run;
+#   mag_g <= 18.5: gmax of the most recent MIKE selection (155_185 runs;
+#            the 251018 MagE backup used 19.0) — the pipeline's gmin bright
+#            limit has no counterpart since the depth cut is max-only;
+#   LMC/SMC excision radii per the *_noSMC selection variants.
+FIDUCIAL = {
+    "population": "RGB",
+    "pmra": (-3.5, 3.5),      # mas/yr
+    "pmdec": (-3.5, 3.5),     # mas/yr
+    "feh": (-5.0, -3.0),      # dex
+    "mag_g": 18.5,            # keep stars brighter than this
+    "sep_lmc": 5.0,           # excision radius around the LMC (deg)
+    "sep_smc": 3.0,           # excision radius around the SMC (deg)
+}
+# every cut column a Clear-all must switch off
+CUT_COLS = ("pmra", "pmdec", "gi0", "feh", "dmod", "ebv", "e_feh", "mag_g",
+            "sep_lmc", "sep_smc")
 
 # canonical column -> catalog column candidates (first match wins)
 CANDS = {
@@ -67,7 +94,7 @@ CANDS = {
     "pmra": ["pmra"], "pmdec": ["pmdec"],
     "ebv": ["ebv_sfd98", "ebv"],
     "feh": ["feh"], "e_feh": ["e_feh"], "dmod": ["dmod"],
-    "magerr_g": ["magerr_psf_g"], "magerr_cahk": ["magerr_psf_cahk"],
+    "mag_g": ["mag_psf_g"],
 }
 # (g-i)_0: dereddened if available, else instrumental
 GI0_CANDS = [("g_dered", "i_dered"), ("mag_psf_g", "mag_psf_i")]
@@ -186,7 +213,7 @@ def build_cache(cat_path, progress=None):
         "star_classes": df["star_class"].value_counts().to_dict(),
         "ranges": {c: rng(c) for c in
                    ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod",
-                    "magerr_g", "magerr_cahk")},
+                    "mag_g")},
     }
     os.makedirs(CACHE_DIR, exist_ok=True)
     pq, js = cache_paths(cat_path)
@@ -232,19 +259,29 @@ def metrics(df, mask):
 
 # ──────────────────────── LVDB overlays ────────────────────────
 def load_lvdb():
-    """(dwarfs, clusters) DataFrames [name, ra, dec] from the first hit per file."""
+    """(dwarfs, clusters) DataFrames [name, ra, dec] from the first hit per
+    file, keeping only systems within LVDB_MAX_DIST_KPC (heliocentric)."""
     def gather(fnames):
         frames = []
         for fn in fnames:
             for d in LVDB_DIRS:
                 p = os.path.join(os.path.expanduser(d), fn)
-                if os.path.exists(p):
-                    t = pd.read_csv(p)
-                    frames.append(pd.DataFrame({
-                        "name": t.get("name", t.get("key", "")),
-                        "ra": pd.to_numeric(t["ra"], errors="coerce"),
-                        "dec": pd.to_numeric(t["dec"], errors="coerce")}).dropna())
-                    break
+                if not os.path.exists(p):
+                    continue
+                t = pd.read_csv(p)
+                if "distance" in t.columns:          # LVDB heliocentric, kpc
+                    dist = pd.to_numeric(t["distance"], errors="coerce")
+                elif "distance_modulus" in t.columns:
+                    dm = pd.to_numeric(t["distance_modulus"], errors="coerce")
+                    dist = 10 ** (dm / 5 - 2)
+                else:
+                    dist = pd.Series(0.0, index=t.index)
+                t = t[dist.fillna(np.inf) < LVDB_MAX_DIST_KPC]
+                frames.append(pd.DataFrame({
+                    "name": t.get("name", t.get("key", "")),
+                    "ra": pd.to_numeric(t["ra"], errors="coerce"),
+                    "dec": pd.to_numeric(t["dec"], errors="coerce")}).dropna())
+                break
         return (pd.concat(frames, ignore_index=True)
                 if frames else pd.DataFrame(columns=["name", "ra", "dec"]))
     return gather(LVDB_DWARF_FILES), gather(LVDB_CLUSTER_FILES)
@@ -268,22 +305,111 @@ def _load_cached(pq, js):
     return _load(pq, js)
 
 
-def _range_slider(st, label, bounds, key, fmt="%.2f", pad=0.05):
-    lo, hi = bounds
+# Each cut control keeps its canonical value in session_state["<key>:val"];
+# the slider and the typed number boxes are synced to it two-way via
+# callbacks. Typed values may exceed the slider's percentile-derived bounds —
+# the typed value always wins (the slider only clips what it displays).
+# The [Fiducial cuts] button stages values under "<key>:pending", which the
+# control consumes (and enables itself) on the next rerun.
+
+def _consume_pending(st, key, vkey, onkey, cast):
+    pend = st.session_state.pop(key + ":pending", None)
+    if pend is not None:
+        st.session_state[vkey] = cast(pend)
+        st.session_state[onkey] = True
+    return pend is not None
+
+
+def _range_cut(st, label, bounds, key, fmt="%.2f", pad=0.05):
+    lo, hi = float(bounds[0]), float(bounds[1])
     span = (hi - lo) or 1.0
-    lo, hi = lo - pad * span, hi + pad * span
-    on = st.checkbox(label, key=key + ":on")
-    val = st.slider(label, lo, hi, (lo, hi), (hi - lo) / 200, format=fmt,
-                    key=key, label_visibility="collapsed", disabled=not on)
-    return on, val
+    slo, shi = lo - pad * span, hi + pad * span
+    step = (shi - slo) / 200
+    vkey, skey = key + ":val", key + ":sl"
+    lokey, hikey, onkey = key + ":lo", key + ":hi", key + ":on"
+
+    def clip(x):
+        return float(min(max(float(x), slo), shi))
+
+    pended = _consume_pending(st, key, vkey, onkey,
+                              lambda v: (float(v[0]), float(v[1])))
+    st.session_state.setdefault(vkey, (slo, shi))
+
+    def from_slider():
+        v = st.session_state[skey]
+        st.session_state[vkey] = (float(v[0]), float(v[1]))
+        st.session_state[lokey], st.session_state[hikey] = st.session_state[vkey]
+
+    def from_boxes():
+        v = sorted((float(st.session_state[lokey]), float(st.session_state[hikey])))
+        st.session_state[vkey] = tuple(v)
+
+    cur = st.session_state[vkey]
+    st.session_state[skey] = (clip(cur[0]), clip(cur[1]))
+    st.session_state.setdefault(lokey, cur[0])
+    st.session_state.setdefault(hikey, cur[1])
+    if pended:
+        st.session_state[lokey], st.session_state[hikey] = cur
+
+    on = st.checkbox(label, key=onkey)
+    st.slider(label, slo, shi, step=step, format=fmt, key=skey,
+              label_visibility="collapsed", disabled=not on,
+              on_change=from_slider)
+    c1, c2 = st.columns(2)
+    c1.number_input(label + " min", step=step, format=fmt, key=lokey,
+                    disabled=not on, on_change=from_boxes,
+                    label_visibility="collapsed")
+    c2.number_input(label + " max", step=step, format=fmt, key=hikey,
+                    disabled=not on, on_change=from_boxes,
+                    label_visibility="collapsed")
+    return on, st.session_state[vkey]
 
 
-def _max_slider(st, label, bounds, key, fmt="%.3f"):
-    lo, hi = 0.0, bounds[1]
-    on = st.checkbox(label, key=key + ":on")
-    val = st.slider(label, lo, hi, hi, (hi - lo) / 200, format=fmt,
-                    key=key, label_visibility="collapsed", disabled=not on)
-    return on, val
+def _thresh_cut(st, label, bounds, key, fmt="%.2f", default=None):
+    lo, hi = float(bounds[0]), float(bounds[1])
+    step = ((hi - lo) or 1.0) / 200
+    vkey, skey, bkey, onkey = key + ":val", key + ":sl", key + ":box", key + ":on"
+
+    pended = _consume_pending(st, key, vkey, onkey, float)
+    st.session_state.setdefault(vkey, float(default if default is not None else hi))
+
+    def from_slider():
+        st.session_state[vkey] = float(st.session_state[skey])
+        st.session_state[bkey] = st.session_state[vkey]
+
+    def from_box():
+        st.session_state[vkey] = float(st.session_state[bkey])
+
+    st.session_state[skey] = float(min(max(st.session_state[vkey], lo), hi))
+    st.session_state.setdefault(bkey, st.session_state[vkey])
+    if pended:
+        st.session_state[bkey] = st.session_state[vkey]
+
+    on = st.checkbox(label, key=onkey)
+    st.slider(label, lo, hi, step=step, format=fmt, key=skey,
+              label_visibility="collapsed", disabled=not on,
+              on_change=from_slider)
+    st.number_input(label + " value", step=step, format=fmt, key=bkey,
+                    disabled=not on, on_change=from_box,
+                    label_visibility="collapsed")
+    return on, st.session_state[vkey]
+
+
+def _queue_fiducial(st, key, rng):
+    """Stage the FIDUCIAL preset (button callback path — widgets pick the
+    values up when they are instantiated later in the same rerun)."""
+    for col, val in FIDUCIAL.items():
+        if col == "population":
+            st.session_state[key + ":pop"] = val
+        elif col in ("sep_lmc", "sep_smc") or rng.get(col):
+            st.session_state[f"{key}:{col}:pending"] = val
+
+
+def _clear_cuts(st, key):
+    st.session_state[key + ":pop"] = "both"
+    for col in CUT_COLS:
+        st.session_state[f"{key}:{col}:on"] = False
+        st.session_state.pop(f"{key}:{col}:pending", None)
 
 
 def render():
@@ -327,12 +453,21 @@ def render():
     cuts = []
     with ctrl:
         st.subheader("Cuts")
-        pops = {"both": ["RGB", "MS"], "RGB": ["RGB"], "MS": ["MS"],
-                "ambiguous": ["ambiguous"], "all": sorted(meta["star_classes"])}
+        b1, b2 = st.columns(2)
+        if b1.button("Fiducial cuts", use_container_width=True,
+                     help="Standard MAGIC low-metallicity giant selection — "
+                          "edit the FIDUCIAL dict at the top of explorer.py"):
+            _queue_fiducial(st, key, rng)
+        if b2.button("Clear all", use_container_width=True):
+            _clear_cuts(st, key)
+
+        pops = {"RGB": ["RGB"], "MS": ["MS"], "both": ["RGB", "MS"],
+                "include ambiguous": ["RGB", "MS", "ambiguous"]}
+        st.session_state.setdefault(key + ":pop", "both")
         pop = st.radio("Population ([Fe/H], dmod are per-class values)",
                        list(pops), horizontal=True, key=key + ":pop")
         cuts.append({"col": "star_class", "kind": "isin", "value": pops[pop],
-                     "enabled": pop != "all"})
+                     "enabled": True})
 
         def add(cut_on, col, kind, value):
             cuts.append({"col": col, "kind": kind, "value": value, "enabled": cut_on})
@@ -343,29 +478,22 @@ def render():
                                 ("feh", "[Fe/H]", "%.2f"),
                                 ("dmod", "distance modulus", "%.2f")):
             if rng.get(col):
-                on, val = _range_slider(st, label, rng[col], f"{key}:{col}", fmt)
+                on, val = _range_cut(st, label, rng[col], f"{key}:{col}", fmt)
                 add(on, col, "range", val)
-        for col, label in (("ebv", "E(B-V) max"),
-                           ("e_feh", "[Fe/H] error max"),
-                           ("magerr_g", "depth: σ(g) max (mag)"),
-                           ("magerr_cahk", "depth: σ(CaHK) max (mag)")):
+        for col, label, fmt, lo in (("ebv", "E(B-V) max", "%.3f", 0.0),
+                                    ("e_feh", "[Fe/H] error max", "%.2f", 0.0),
+                                    ("mag_g", "depth: g max (mag_psf_g)",
+                                     "%.2f", None)):
             if rng.get(col):
-                on, val = _max_slider(st, label, rng[col], f"{key}:{col}")
+                bounds = (rng[col][0] if lo is None else lo, rng[col][1])
+                on, val = _thresh_cut(st, label, bounds, f"{key}:{col}", fmt)
                 add(on, col, "max", val)
-
-        classes = sorted(meta["star_classes"])
-        on = st.checkbox("star_class", key=key + ":cls:on")
-        sel = st.multiselect("star_class", classes, default=classes,
-                             key=key + ":cls", label_visibility="collapsed",
-                             disabled=not on)
-        add(on, "star_class", "isin", sel)
 
         st.subheader("Excise Clouds")
         for name, (cra, cdec, rdef), col in (("LMC", LMC, "sep_lmc"),
                                              ("SMC", SMC, "sep_smc")):
-            on = st.checkbox(f"cut {name} center ({cra}, {cdec})", key=f"{key}:{col}:on")
-            r = st.slider(f"{name} radius (deg)", 0.5, 15.0, rdef, 0.5,
-                          key=f"{key}:{col}", disabled=not on)
+            on, r = _thresh_cut(st, f"cut {name} ({cra}, {cdec}) — radius (deg)",
+                                (0.5, 15.0), f"{key}:{col}", "%.1f", default=rdef)
             add(on, col, "min", r)
 
     mask = apply_cuts(df, cuts)
@@ -421,11 +549,13 @@ def panel_sky(df, mask, ui):
             name="already observed",
             marker=dict(symbol="x", size=7, color="#e45756")))
 
-    if len(x):
+    if not gal:
+        xr = [0.0, 360.0]  # RA always spans the full circle
+    elif len(x):
         xr = [float(np.nanmin(x)), float(np.nanmax(x))]
-        yr = [float(np.nanmin(y)), float(np.nanmax(y))]
     else:
-        xr, yr = [0, 360], [-90, 90]
+        xr = [0.0, 360.0]
+    yr = ([float(np.nanmin(y)), float(np.nanmax(y))] if len(y) else [-90, 90])
     dwarfs, clusters = load_lvdb()
     for show, cat, sym, color, label in (
             (show_dw, dwarfs, "star", "#f2b701", "dwarf galaxies"),
@@ -452,7 +582,7 @@ def panel_sky(df, mask, ui):
                       xaxis_title=xc, yaxis_title=yc,
                       legend=dict(orientation="h", y=1.06))
     if not gal:
-        fig.update_xaxes(autorange="reversed")  # RA increases leftward
+        fig.update_xaxes(range=[360, 0])  # full 0-360 deg, RA increasing leftward
     st.plotly_chart(fig, use_container_width=True)
 
 

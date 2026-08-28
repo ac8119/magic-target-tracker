@@ -23,11 +23,14 @@ A password-protected Streamlit app that lets anyone on the team:
 - `secrets.toml.example` — template for logins + optional Google Sheet queue
 
 ## Target-selection explorer (workstation)
-Interactive slider cuts over a full MAGIC catalog with linked panels
-(on-sky in RA/Dec or Galactic l/b with LVDB dwarfs + star clusters and
-already-observed stars overplotted, distance-modulus histogram, [Fe/H] vs
-uncertainty), LMC/SMC excision circles, and headline counts of how many
-selected stars are already observed (2" match against the ledger).
+Interactive cuts (sliders + typed min/max boxes, two-way synced; a
+"Fiducial cuts" button applies the standard giant selection from the
+FIDUCIAL dict in explorer.py) over a full MAGIC catalog with linked panels
+(on-sky in RA/Dec or Galactic l/b with LVDB dwarfs + MW star clusters
+within 300 kpc and already-observed stars overplotted, distance-modulus
+histogram, [Fe/H] vs uncertainty), LMC/SMC excision circles, and headline
+counts of how many selected stars are already observed (2" match against
+the ledger).
 ```bash
 python3 explorer.py /path/to/catalog.fits   # optional: prebuild the Parquet cache
 streamlit run app.py                        # sidebar page: "Target explorer"
