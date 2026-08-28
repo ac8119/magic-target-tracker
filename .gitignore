@@ -1,3 +1,8 @@
 .streamlit/secrets.toml
 data/queue.csv
 __pycache__/
+
+# workstation ingestion output: 11k+ unpublished proposed-target coordinates.
+# The repo is public - only commit this if you are OK with it being world-readable
+# (needed for the cloud deploy to show the Follow-up progress page).
+data/target_runs.csv

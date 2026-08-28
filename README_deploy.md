@@ -12,7 +12,24 @@ A password-protected Streamlit app that lets anyone on the team:
 - `build_exclusion_master.py` — regenerates `data/master_exclusion.csv` from the
   four source ledgers. **Re-run after every observing run / GMOS export update.**
 - `data/master_exclusion.csv` — merged observed table the app reads
+- `build_followup_progress.py` — workstation ingestion: reads the dated target
+  runs in `magic_targets/` and the observed catalogs in `magic_obs/` (from
+  `$MAGIC_FOLLOWUP_DIR`, default `~/Documents/Research/magic-low-metallicity-followup`),
+  cross-matches at 1", and writes `data/target_runs.csv` for the
+  **Follow-up progress** page. Re-run after every observing run / target selection.
+- `data/target_runs.csv` — per-run target status table (git-ignored: the repo is
+  public and this holds unpublished proposed-target coordinates)
+- `tests/smoke_test.py` — end-to-end check of the ingestion + progress page
 - `secrets.toml.example` — template for logins + optional Google Sheet queue
+
+## Follow-up progress (workstation)
+```bash
+python3 build_followup_progress.py   # needs astropy; ~30 s
+python3 tests/smoke_test.py          # optional sanity check
+streamlit run app.py                 # new sidebar page: "Follow-up progress"
+```
+The page appears only when `data/target_runs.csv` exists, so the cloud deploy
+is unaffected until you decide to commit that file.
 
 ## Run locally
 ```bash
