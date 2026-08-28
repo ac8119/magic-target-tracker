@@ -951,9 +951,11 @@ def panel_feh(df, mask, ui):
                 v = v[0] if v else None
             if v is not None:
                 picked.append(int(v))
-        st.session_state[sel_key] = sorted(set(picked))
+        if picked:   # a rerun without an active chart selection keeps the
+            st.session_state[sel_key] = sorted(set(picked))   # current one
         st.caption("Click a star (or box/lasso-select) to highlight it in "
-                   "the target table below.")
+                   "the target table below; use the button above the chart "
+                   "to clear a selection.")
     else:
         st.plotly_chart(fig, use_container_width=True)
         import streamlit as _stmod
