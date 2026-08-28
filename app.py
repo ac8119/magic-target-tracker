@@ -349,9 +349,16 @@ if check_login():
     excl = load_exclusion()
     queue = load_queue()
     prog = load_progress()
+    try:  # workstation-only page: needs local catalogs (+ astropy/pyarrow/plotly)
+        import explorer
+        explorer_ok = bool(explorer.find_catalogs())
+    except ImportError:
+        explorer_ok = False
     st.sidebar.title("🔭 MAGIC Target Tracker")
     st.sidebar.markdown(f"Logged in as **{st.session_state['user']}**")
     pages = ["Check targets", "Queue", "Browse observed"]
+    if explorer_ok:
+        pages.append("Target explorer")
     if prog is not None:
         pages.append("Follow-up progress")
     page = st.sidebar.radio("Page", pages)
@@ -371,6 +378,8 @@ if check_login():
         page_check(excl, queue)
     elif page == "Queue":
         page_queue(excl, queue)
+    elif page == "Target explorer":
+        explorer.render()
     elif page == "Follow-up progress":
         page_progress(prog)
     else:

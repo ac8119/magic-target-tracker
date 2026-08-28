@@ -5,16 +5,20 @@ End-to-end smoke test for the workstation ingestion.
 Run after build_followup_progress.py:
     python3 tests/smoke_test.py
 
-Checks that data/target_runs.csv is well-formed and that the app's
-"Follow-up progress" page actually renders it (via streamlit.testing).
+Checks that data/target_runs.csv is well-formed, that the explorer's
+filter + metric logic is correct on a synthetic frame, and that the app
+renders the "Target explorer" and "Follow-up progress" pages
+(via streamlit.testing).
 """
 import os
 import sys
 
+import numpy as np
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE)
 CSV = os.path.join(BASE, "data", "target_runs.csv")
 
 # ── 1. the ingestion output is sane ──
@@ -32,7 +36,38 @@ print(f"OK  target_runs.csv: {len(df)} rows, {n_runs} runs, "
       f"{(df['status'] == 'observed').sum()} observed, "
       f"{(df['status'] == 'literature-known').sum()} literature-known")
 
-# ── 2. the app renders the progress page ──
+# ── 2. explorer filter + metric logic on a synthetic frame ──
+import explorer
+
+syn = pd.DataFrame({
+    "ra":       [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+    "dec":      [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+    "feh":      [-3.0, -2.0, np.nan, -3.5, -1.0, -2.8],
+    "e_feh":    [0.2, 0.3, np.nan, 0.1, 0.9, 0.4],
+    "ebv":      [0.05, 0.15, 0.02, 0.01, 0.30, 0.08],
+    "star_class": pd.Categorical(["RGB", "MS", "ambiguous", "RGB", "MS", "RGB"]),
+    "sep_lmc":  [10.0, 2.0, 8.0, 20.0, 1.0, 30.0],
+    "observed": [True, False, False, True, False, False],
+})
+cuts = [
+    {"col": "feh", "kind": "range", "value": (-4.0, -2.5), "enabled": True},
+    {"col": "ebv", "kind": "max", "value": 0.1, "enabled": True},
+    {"col": "star_class", "kind": "isin", "value": ["RGB"], "enabled": True},
+    {"col": "sep_lmc", "kind": "min", "value": 5.0, "enabled": True},
+]
+mask = explorer.apply_cuts(syn, cuts)
+# rows 0,3,5 are RGB with feh in range, ebv<=0.1, outside the LMC circle;
+# row 2 has NaN feh and must fail the enabled range cut
+assert mask.tolist() == [True, False, False, True, False, True], mask.tolist()
+m = explorer.metrics(syn, mask)
+assert m == {"selected": 3, "observed": 2, "remaining": 1}, m
+# disabled cuts must filter nothing
+for c in cuts:
+    c["enabled"] = False
+assert explorer.apply_cuts(syn, cuts).all()
+print("OK  explorer apply_cuts/metrics on synthetic frame")
+
+# ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)
 at.secrets["credentials"] = {"smoketest": "pw"}
 at.session_state["user"] = "smoketest"
@@ -45,11 +80,28 @@ assert "Follow-up progress" in radio.options, \
 radio.set_value("Follow-up progress").run()
 assert not at.exception, at.exception
 
-metrics = {m.label: m.value for m in at.metric}
-assert "Unique targets proposed" in metrics, f"metrics rendered: {metrics}"
+page_metrics = {m.label: m.value for m in at.metric}
+assert "Unique targets proposed" in page_metrics, f"metrics rendered: {page_metrics}"
 uniq = df[~df["in_earlier_run"]]
-assert metrics["Unique targets proposed"] == f"{len(uniq):,}"
-assert metrics["Observed"] == f"{(uniq['status'] == 'observed').sum():,}"
+assert page_metrics["Unique targets proposed"] == f"{len(uniq):,}"
+assert page_metrics["Observed"] == f"{(uniq['status'] == 'observed').sum():,}"
 assert len(at.dataframe) >= 2, "per-run summary / target tables not rendered"
-print(f"OK  app 'Follow-up progress' page renders: {metrics}")
+print(f"OK  app 'Follow-up progress' page renders: {page_metrics}")
+
+# ── 4. the explorer page renders on the cached real catalog (if present) ──
+import glob as _glob
+if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.parquet")):
+    at2 = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=300)
+    at2.secrets["credentials"] = {"smoketest": "pw"}
+    at2.session_state["user"] = "smoketest"
+    at2.run()
+    radio = at2.sidebar.radio[0]
+    assert "Target explorer" in radio.options, radio.options
+    radio.set_value("Target explorer").run()
+    assert not at2.exception, at2.exception
+    em = {m.label: m.value for m in at2.metric}
+    assert "Passing cuts" in em and "Already observed" in em, em
+    print(f"OK  app 'Target explorer' page renders: {em}")
+else:
+    print("SKIP explorer page render (no catalog/cache on this machine)")
 print("SMOKE TEST PASSED")

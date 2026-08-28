@@ -22,6 +22,25 @@ A password-protected Streamlit app that lets anyone on the team:
 - `tests/smoke_test.py` — end-to-end check of the ingestion + progress page
 - `secrets.toml.example` — template for logins + optional Google Sheet queue
 
+## Target-selection explorer (workstation)
+Interactive slider cuts over a full MAGIC catalog with linked panels
+(on-sky in RA/Dec or Galactic l/b with LVDB dwarfs + star clusters and
+already-observed stars overplotted, distance-modulus histogram, [Fe/H] vs
+uncertainty), LMC/SMC excision circles, and headline counts of how many
+selected stars are already observed (2" match against the ledger).
+```bash
+python3 explorer.py /path/to/catalog.fits   # optional: prebuild the Parquet cache
+streamlit run app.py                        # sidebar page: "Target explorer"
+```
+Catalogs are discovered via `MAGIC_CATALOG_GLOBS` (colon-separated globs; see
+`explorer.py` for the defaults) and the filename acts as the version label.
+First use of a catalog builds a column-pruned Parquet cache under
+`data/explorer_cache/` (git-ignored); filtering always runs over the full
+cached table and only the display decimates. Needs astropy, pyarrow, scipy,
+and plotly (workstation only — the cloud deploy hides the page when no
+catalogs are found). `data/lvdb/` holds the LVDB globular-cluster tables;
+dwarfs are read from the local LVDB checkout (`MAGIC_LVDB_DIR`).
+
 ## Follow-up progress (workstation)
 ```bash
 python3 build_followup_progress.py   # needs astropy; ~30 s
