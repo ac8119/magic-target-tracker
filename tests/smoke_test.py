@@ -67,7 +67,19 @@ assert m == {"selected": 3, "observed": 2, "remaining": 1}, m
 for c in cuts:
     c["enabled"] = False
 assert explorer.apply_cuts(syn, cuts).all()
-print("OK  explorer apply_cuts/metrics on synthetic frame")
+
+# LVDB occupancy: a marker is kept only with surviving stars in its own or
+# an 8-adjacent ~2 deg pixel (RA wraparound included)
+stars_ra = np.array([10.0, 359.9])
+stars_dec = np.array([-1.0, -30.0])
+m_ra = np.array([10.5, 0.5, 200.0, 10.5])
+m_dec = np.array([-0.5, -30.5, 50.0, -80.0])
+keep = explorer.occupied(stars_ra, stars_dec, m_ra, m_dec)
+# marker 0: same/adjacent pixel; marker 1: adjacent across the RA wrap;
+# markers 2, 3: nowhere near any star
+assert keep.tolist() == [True, True, False, False], keep.tolist()
+assert not explorer.occupied(np.array([]), np.array([]), m_ra, m_dec).any()
+print("OK  explorer apply_cuts/metrics + LVDB occupancy on synthetic data")
 
 # ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)

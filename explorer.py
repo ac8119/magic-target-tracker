@@ -80,7 +80,15 @@ FIDUCIAL = {
     "pmra": (-3.5, 3.5),      # mas/yr
     "pmdec": (-3.5, 3.5),     # mas/yr
     "feh": (-5.0, -3.0),      # dex
+    "gi0": (0.2, 1.5),        # overview paper quality cut (magic.tex ~l.447):
+                              # "0.2 < (g-i)_0 < 1.5 to exclude the coolest
+                              # stars and regions significantly bluer than
+                              # the main-sequence turnoff"
     "mag_g": 18.5,            # keep stars brighter than this
+    "dmod": (17.39, 25.0),    # dmod > 17.39 <=> d > 30 kpc (5*log10(30000/10));
+                              # the upper bound is the slider's hard limit,
+                              # i.e. effectively no far cut
+    "ebv": 0.05,              # stricter than the catalog's baked-in E(B-V)<0.2
     "sep_lmc": 5.0,           # excision radius around the LMC (deg)
     "sep_smc": 3.0,           # excision radius around the SMC (deg)
 }
@@ -258,6 +266,41 @@ def metrics(df, mask):
 
 
 # ──────────────────────── LVDB overlays ────────────────────────
+OCC_BIN_DEG = 2.0  # coarse sky pixel for the marker occupancy test
+
+
+def occupancy_grid(star_ra, star_dec, bin_deg=OCC_BIN_DEG):
+    """~bin_deg RA/Dec sky pixels holding >=1 star, dilated to the 8 adjacent
+    pixels (RA wraparound handled; Dec clipped at the poles). Build it once
+    per interaction, then test each marker set against it."""
+    nx, ny = int(round(360 / bin_deg)), int(round(180 / bin_deg))
+    if not len(star_ra):
+        return np.zeros((nx, ny), dtype=bool)
+    occ = np.histogram2d(np.mod(star_ra, 360.0), star_dec, bins=[nx, ny],
+                         range=[[0, 360], [-90, 90]])[0] > 0
+    dil = np.zeros_like(occ)
+    for di in (-1, 0, 1):
+        r = np.roll(occ, di, axis=0)          # RA wraps around
+        dil |= r
+        dil[:, 1:] |= r[:, :-1]               # Dec neighbors, clipped at poles
+        dil[:, :-1] |= r[:, 1:]
+    return dil
+
+
+def grid_lookup(grid, m_ra, m_dec, bin_deg=OCC_BIN_DEG):
+    """Which markers land on an occupied (dilated) pixel of the grid."""
+    m_ra, m_dec = np.asarray(m_ra, float), np.asarray(m_dec, float)
+    nx, ny = grid.shape
+    ix = np.clip((np.mod(m_ra, 360.0) / bin_deg).astype(int), 0, nx - 1)
+    iy = np.clip(((m_dec + 90.0) / bin_deg).astype(int), 0, ny - 1)
+    return grid[ix, iy]
+
+
+def occupied(star_ra, star_dec, m_ra, m_dec, bin_deg=OCC_BIN_DEG):
+    """Convenience wrapper: occupancy_grid + grid_lookup in one call."""
+    return grid_lookup(occupancy_grid(star_ra, star_dec, bin_deg),
+                       m_ra, m_dec, bin_deg)
+
 def load_lvdb():
     """(dwarfs, clusters) DataFrames [name, ra, dec] from the first hit per
     file, keeping only systems within LVDB_MAX_DIST_KPC (heliocentric)."""
@@ -549,19 +592,16 @@ def panel_sky(df, mask, ui):
             name="already observed",
             marker=dict(symbol="x", size=7, color="#e45756")))
 
-    if not gal:
-        xr = [0.0, 360.0]  # RA always spans the full circle
-    elif len(x):
-        xr = [float(np.nanmin(x)), float(np.nanmax(x))]
-    else:
-        xr = [0.0, 360.0]
-    yr = ([float(np.nanmin(y)), float(np.nanmax(y))] if len(y) else [-90, 90])
+    occ = occupancy_grid(df["ra"].to_numpy()[mask], df["dec"].to_numpy()[mask])
     dwarfs, clusters = load_lvdb()
     for show, cat, sym, color, label in (
             (show_dw, dwarfs, "star", "#f2b701", "dwarf galaxies"),
             (show_gc, clusters, "triangle-up", "#00b8d9", "star clusters")):
         if not show or not len(cat):
             continue
+        # occupancy test in RA/Dec: marker (or an 8-neighbor pixel) must
+        # hold at least one star surviving the current cuts
+        keep = grid_lookup(occ, cat["ra"].values, cat["dec"].values)
         if gal:
             from astropy.coordinates import SkyCoord
             from astropy import units as u
@@ -570,10 +610,9 @@ def panel_sky(df, mask, ui):
             cx, cy = g.l.deg, g.b.deg
         else:
             cx, cy = cat["ra"].values, cat["dec"].values
-        inview = ((cx >= xr[0]) & (cx <= xr[1]) & (cy >= yr[0]) & (cy <= yr[1]))
         fig.add_trace(go.Scatter(
-            x=cx[inview], y=cy[inview], mode="markers+text", name=label,
-            text=cat["name"].values[inview], textposition="top center",
+            x=cx[keep], y=cy[keep], mode="markers+text", name=label,
+            text=cat["name"].values[keep], textposition="top center",
             textfont=dict(size=9, color=color),
             marker=dict(symbol=sym, size=9, color=color,
                         line=dict(width=1, color="black"))))
