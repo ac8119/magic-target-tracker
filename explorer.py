@@ -719,6 +719,7 @@ def render():
 
         import inspect
         ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
+              "cuts": cuts,
               # click-to-highlight: selected df row positions live under
               # sel_key; the e_feh panel writes it (plotly selection events,
               # Streamlit >= 1.35 only), the table panel consumes it
@@ -838,39 +839,78 @@ def panel_sky(df, mask, ui):
     st.plotly_chart(fig, use_container_width=True)
 
 
+KPC_TICKS = (10, 20, 30, 50, 100, 150, 200)   # top-axis labels (kpc)
+
+
+def _dmod_to_kpc(dmod):
+    return 10 ** ((np.asarray(dmod, float) - 10.0) / 5.0)
+
+
 def panel_dmod(df, mask, ui):
     import plotly.graph_objects as go
     st = ui["st"]
     v = df["dmod"].to_numpy()[mask]
     v = v[np.isfinite(v)]
-    fig = go.Figure()
-    if len(v):
-        cnt, edges = np.histogram(v, bins=120)
-        fig.add_trace(go.Bar(x=0.5 * (edges[:-1] + edges[1:]), y=cnt,
-                             name="targets", marker_color="#4c78a8"))
-        o = df["dmod"].to_numpy()[mask & (np.asarray(df["obs_cat"]) != "")]
-        o = o[np.isfinite(o)]
-        if len(o):
-            cnt2, _ = np.histogram(o, bins=edges)
-            fig.add_trace(go.Bar(x=0.5 * (edges[:-1] + edges[1:]), y=cnt2,
-                                 name="observed by us", marker_color="#e45756"))
-        s = df["dmod"].to_numpy()[ui["sim_mask"]]
-        s = s[np.isfinite(s)]
-        if len(s):
-            cnt3, _ = np.histogram(s, bins=edges)
-            fig.add_trace(go.Scatter(
-                x=0.5 * (edges[:-1] + edges[1:]),
-                y=np.where(cnt3 > 0, cnt3, np.nan),   # gaps instead of log(0)
-                name="In SIMBAD", mode="lines",
-                line=dict(color=SIMBAD_COLOR, width=3, shape="hvh")))
-        fig.update_layout(barmode="overlay", height=340,
-                          margin=dict(l=10, r=10, t=10, b=10),
-                          xaxis_title="distance modulus (per-class)",
-                          yaxis_title="N", yaxis_type="log")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
+    if not len(v):
         st.caption("No finite dmod values in the current selection "
                    "(ambiguous/invalid stars have none).")
+        return
+
+    # adaptive binning: ~2*sqrt(N) bins keeps fiducial-scale selections
+    # (a few hundred stars) from being shredded across 120 near-empty bins
+    nbins = int(np.clip(2 * np.sqrt(len(v)), 20, 120))
+    cnt, edges = np.histogram(v, bins=nbins)
+    ctr = 0.5 * (edges[:-1] + edges[1:])
+    kpc = _dmod_to_kpc(ctr)
+    hover = ("dmod %{x:.2f} · %{customdata:.1f} kpc · N = %{y}"
+             "<extra>%{fullData.name}</extra>")
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=ctr, y=cnt, customdata=kpc, name="targets",
+                         marker_color="#4c78a8", hovertemplate=hover))
+    o = df["dmod"].to_numpy()[mask & (np.asarray(df["obs_cat"]) != "")]
+    o = o[np.isfinite(o)]
+    if len(o):
+        cnt2, _ = np.histogram(o, bins=edges)
+        fig.add_trace(go.Bar(x=ctr, y=cnt2, customdata=kpc,
+                             name="observed by us", marker_color="#e45756",
+                             hovertemplate=hover))
+    s = df["dmod"].to_numpy()[ui["sim_mask"]]
+    s = s[np.isfinite(s)]
+    if len(s):
+        cnt3, _ = np.histogram(s, bins=edges)
+        fig.add_trace(go.Scatter(
+            x=ctr, y=np.where(cnt3 > 0, cnt3, np.nan),   # gaps, not log(0)
+            customdata=kpc, name="In SIMBAD", mode="lines",
+            line=dict(color=SIMBAD_COLOR, width=3, shape="hvh"),
+            hovertemplate=hover))
+
+    # dashed line where an enabled dmod cut starts (fiducial: d > 30 kpc)
+    for cut in ui.get("cuts", []):
+        if (cut["col"] == "dmod" and cut["kind"] == "range"
+                and cut.get("enabled")):
+            lo = float(cut["value"][0])
+            if edges[0] <= lo <= edges[-1]:
+                fig.add_vline(x=lo, line_dash="dash", line_color="#666",
+                              annotation_text=f"d > {_dmod_to_kpc(lo):.0f} kpc",
+                              annotation_position="top right")
+
+    # secondary top axis in physical distance: dmod = 5 log10(d / kpc) + 10
+    fig.add_trace(go.Scatter(x=[float(ctr[0]), float(ctr[-1])], y=[None, None],
+                             xaxis="x2", showlegend=False, hoverinfo="skip"))
+    # linear y shows the distribution's shape at fiducial-scale N; log keeps
+    # the small observed/SIMBAD overlays visible against millions of targets
+    log_y = len(v) > 10_000
+    fig.update_layout(
+        barmode="overlay", height=360, margin=dict(l=10, r=10, t=40, b=10),
+        xaxis_title="distance modulus (RGB/MS per class)",
+        yaxis_title="N", yaxis_type="log" if log_y else "linear",
+        xaxis2=dict(matches="x", overlaying="x", side="top",
+                    tickvals=[5 * np.log10(k) + 10 for k in KPC_TICKS],
+                    ticktext=[str(k) for k in KPC_TICKS],
+                    title=dict(text="distance (kpc)", font=dict(size=11)),
+                    showgrid=False))
+    st.plotly_chart(fig, use_container_width=True)
 
 
 CLICK_MAX = 20_000   # clickable-scatter cap on top of the density layer
@@ -906,12 +946,12 @@ def panel_feh(df, mask, ui):
         fig.add_trace(go.Scattergl(
             x=feh[rows_click], y=e_feh[rows_click], mode="markers",
             customdata=rows_click, showlegend=False, name="targets",
-            marker=dict(size=3, color="rgba(76,120,168,0.25)")))
+            marker=dict(size=4, color="rgba(76,120,168,0.35)")))
     else:
         fig.add_trace(go.Scattergl(
             x=feh[rows_ok], y=e_feh[rows_ok], mode="markers", name="targets",
             customdata=rows_ok,
-            marker=dict(size=2, color="#4c78a8", opacity=0.5)))
+            marker=dict(size=5, color="#3a5f8a", opacity=0.75)))
 
     obs_rows = np.flatnonzero(mask & (np.asarray(df["obs_cat"]) != ""))
     obs_rows = obs_rows[np.isfinite(feh[obs_rows]) & np.isfinite(e_feh[obs_rows])]
@@ -919,14 +959,14 @@ def panel_feh(df, mask, ui):
         fig.add_trace(go.Scattergl(
             x=feh[obs_rows], y=e_feh[obs_rows], mode="markers",
             name="observed by us", customdata=obs_rows,
-            marker=dict(symbol="x", size=7, color="#e45756")))
+            marker=dict(symbol="x", size=9, color="#e45756")))
     sim_rows = np.flatnonzero(ui["sim_mask"])
     sim_rows = sim_rows[np.isfinite(feh[sim_rows]) & np.isfinite(e_feh[sim_rows])]
     if len(sim_rows):
         fig.add_trace(go.Scattergl(
             x=feh[sim_rows], y=e_feh[sim_rows], mode="markers",
             name="In SIMBAD", customdata=sim_rows,
-            marker=dict(symbol="diamond-open", size=8, color=SIMBAD_COLOR)))
+            marker=dict(symbol="diamond-open", size=10, color=SIMBAD_COLOR)))
     fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
                       xaxis_title="[Fe/H] (per-class)",
                       yaxis_title="σ([Fe/H])")

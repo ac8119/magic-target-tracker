@@ -225,6 +225,7 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     charts = [chart_spec(el) for el in at2.get("plotly_chart")]
     assert len(charts) >= 3, f"expected sky/dmod/feh charts, got {len(charts)}"
     assert "In SIMBAD" in charts[1], "dmod panel lacks the SIMBAD overlay"
+    assert "distance (kpc)" in charts[1], "dmod panel lacks the kpc top axis"
     assert "In SIMBAD" in charts[2], "e_feh panel lacks the SIMBAD overlay"
     # and the filtered-target table gains a sortable in_simbad column
     tab = at2.dataframe[0].value
