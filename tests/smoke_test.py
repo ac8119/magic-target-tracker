@@ -148,8 +148,72 @@ assert explorer.path_allowed("/data/magic", roots)
 assert not explorer.path_allowed("/etc/passwd", roots)
 assert not explorer.path_allowed("/data/magic/../../etc", roots)   # traversal
 assert not explorer.path_allowed("/data/magicother/x.fits", roots) # prefix trick
+# cloud subset maker: cut + schema columns + roundtrip through the loader
+import tempfile as _tf
+from build_cloud_subset import make_subset
+big = syn.assign(mag_g=17.0, dmod=16.5, junk_col=1.0)
+sub = make_subset(big, "feh == feh and star_class in ['RGB', 'MS']")
+assert len(sub) == 5, len(sub)   # row 2 (NaN feh AND ambiguous) dropped
+assert "junk_col" not in sub.columns and "obs_cat" in sub.columns
+pq_tmp = os.path.join(_tf.mkdtemp(), "sub.parquet")
+sub.to_parquet(pq_tmp, compression="zstd", index=False)
+back = pd.read_parquet(pq_tmp)
+meta_rt = explorer._make_meta(back, "sub@test")
+assert meta_rt["n_rows"] == 5 and meta_rt["ranges"]["feh"] is not None
+assert explorer.apply_cuts(
+    back, [{"col": "feh", "kind": "max", "value": -2.9, "enabled": True}]
+).sum() == 2   # rows at -3.0 and -3.5
+
+# release-asset source: spec parsing + mocked-API download (no network)
+spec = explorer.release_spec({"catalogs": {"release": {
+    "repo": "o/r", "tag": "v1", "asset": "sub.parquet", "token": "SECRET"}}})
+assert spec["assets"] == ["sub.parquet"]          # str -> list
+assert explorer.release_spec({"catalogs": {"release": {"repo": "o/r"}}}) is None
+assert explorer.release_spec({}) is None
+
+class FakeResp:
+    def __init__(self, status, js=None, chunks=None):
+        self.status_code, self._js, self._chunks = status, js, chunks or []
+    def json(self):
+        return self._js
+    def iter_content(self, chunk_size):
+        return iter(self._chunks)
+
+class FakeSession:
+    def __init__(self):
+        self.calls = []
+    def get(self, url, headers=None, **kw):
+        self.calls.append((url, headers or {}))
+        if url.endswith("/releases/tags/v1"):
+            return FakeResp(200, js={"assets": [
+                {"name": "sub.parquet", "id": 77, "size": 8}]})
+        if url.endswith("/releases/assets/77"):
+            return FakeResp(200, chunks=[b"PARQ", b"UET!"])
+        return FakeResp(404)
+
+fs = FakeSession()
+dest = os.path.join(_tf.mkdtemp(), "dl.parquet")
+explorer.fetch_release_asset("o/r", "v1", "sub.parquet", "SECRET", dest,
+                             session=fs)
+assert open(dest, "rb").read() == b"PARQUET!"
+assert fs.calls[0][1]["Authorization"] == "Bearer SECRET"
+assert fs.calls[1][1]["Accept"] == "application/octet-stream"
+try:
+    explorer.fetch_release_asset("o/r", "v9", "sub.parquet", "SECRET",
+                                 dest + "2", session=fs)
+    raise SystemExit("expected a lookup failure")
+except RuntimeError as e:
+    assert "404" in str(e) and "SECRET" not in str(e), e
+try:
+    explorer.fetch_release_asset("o/r", "v1", "nope.parquet", "SECRET",
+                                 dest + "3", session=fs)
+    raise SystemExit("expected a missing-asset failure")
+except RuntimeError as e:
+    assert "nope.parquet" in str(e) and "SECRET" not in str(e), e
+
 print("OK  explorer cuts/metrics, category split, occupancy, SIMBAD stub, "
-      "selection helpers, per-user globs + path allowlist")
+      "selection helpers, per-user globs + path allowlist, cloud subset + "
+      "release source")
 
 # ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)

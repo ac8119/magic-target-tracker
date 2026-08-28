@@ -31,6 +31,31 @@ collaborator's server); leave it unset on the shared duplicate-checker
 deploy so the pages stay internal even if data files are ever committed
 by accident.
 
+### Explorer on Streamlit Community Cloud (release-asset catalog)
+The multi-GB FITS catalogs can't ship to the cloud; host a pre-cut
+explorer-schema subset as a private GitHub release asset instead:
+1. `python3 build_cloud_subset.py` — cuts the default catalog to valid-
+   [Fe/H] RGB/MS rows and the explorer's columns (2025B: 5.6M rows,
+   320 MB zstd Parquet, ~330 MB in RAM — inside the ~1 GB cloud budget;
+   tighten with `--cut "... and feh < -1.0"` if a bigger catalog busts it).
+2. Put it in a PRIVATE data repo release:
+   `gh release create v1 *_cloud_subset.parquet --repo you/magic-data`
+3. Make a fine-grained PAT scoped to that one repo, Contents: read-only.
+4. In the Streamlit dashboard's Secrets box add (alongside credentials
+   and `[features] explorer = true`):
+   ```
+   [catalogs.release]
+   repo = "you/magic-data"
+   tag = "v1"
+   asset = "2025B_magic_noSMC_g195_ebv02_classified_cloud_subset.parquet"
+   token = "github_pat_..."
+   ```
+   (`asset` may be a list to offer several versions.)
+5. The explorer lists the asset as `asset@tag`; the first selection per
+   container streams it into `data/explorer_cache/` (progress bar) and
+   every later load is instant. Download failures show the HTTP status
+   and never the token.
+
 Catalog discovery is per-deployment (see `secrets.toml.example`):
 `[catalogs] globs` lists search paths, `[catalogs.users]` adds per-login
 paths (merged first), `MAGIC_CATALOG_GLOBS` overrides for CLI/dev when

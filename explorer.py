@@ -107,6 +107,12 @@ FIDUCIAL = {
 CUT_COLS = ("pmra", "pmdec", "gi0", "feh", "dmod", "ebv", "e_feh", "mag_g",
             "sep_lmc", "sep_smc")
 
+# every column a built cache / cloud subset carries
+SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
+                  "mag_g", "gi0", "star_class", "l", "b", "sep_lmc", "sep_smc",
+                  "obs_cat", "lit_known"]
+RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g")
+
 # canonical column -> catalog column candidates (first match wins)
 CANDS = {
     "ra": ["ra"], "dec": ["dec"],
@@ -179,6 +185,67 @@ def find_catalogs(user=None, extra_globs=()):
     return out
 
 
+def release_spec(secrets):
+    """Parsed [catalogs.release] secrets: repo/tag/token plus asset name list
+    (a plain string `asset` becomes a one-element list); None if unset or
+    incomplete. The token never leaves this dict."""
+    try:
+        rel = secrets["catalogs"]["release"]
+    except (KeyError, FileNotFoundError, TypeError):
+        return None
+    assets = rel.get("asset", [])
+    if isinstance(assets, str):
+        assets = [assets]
+    if not (rel.get("repo") and rel.get("tag") and assets):
+        return None
+    return {"repo": str(rel["repo"]), "tag": str(rel["tag"]),
+            "assets": [str(a) for a in assets],
+            "token": str(rel.get("token", ""))}
+
+
+def fetch_release_asset(repo, tag, asset, token, dest, session=None,
+                        progress=None):
+    """Stream one GitHub release asset to dest via the API: look up the asset
+    id under the tag, then GET the asset with Accept: octet-stream following
+    the redirect. Errors carry HTTP statuses only — never the token."""
+    import requests
+    s = session or requests.Session()
+    auth = {"Authorization": f"Bearer {token}"} if token else {}
+    r = s.get(f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
+              headers={**auth, "Accept": "application/vnd.github+json"},
+              timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"release lookup failed (HTTP {r.status_code})")
+    hit = next((a for a in r.json().get("assets", [])
+                if a.get("name") == asset), None)
+    if hit is None:
+        raise RuntimeError(f"asset '{asset}' not found in release {tag}")
+    r2 = s.get(f"https://api.github.com/repos/{repo}/releases/assets/{hit['id']}",
+               headers={**auth, "Accept": "application/octet-stream"},
+               stream=True, allow_redirects=True, timeout=300)
+    if r2.status_code != 200:
+        raise RuntimeError(f"asset download failed (HTTP {r2.status_code})")
+    total = int(hit.get("size") or 0)
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    tmp, done = dest + ".part", 0
+    with open(tmp, "wb") as f:
+        for chunk in r2.iter_content(chunk_size=1 << 20):
+            f.write(chunk)
+            done += len(chunk)
+            if progress and total:
+                progress(min(1.0, done / total))
+    os.replace(tmp, dest)
+    return dest
+
+
+def release_paths(rel, asset):
+    """Cache-dir paths for a downloaded release asset (already schema
+    Parquet — the download IS the cache, so one fetch per container)."""
+    stem = os.path.splitext(asset)[0]
+    base = os.path.join(CACHE_DIR, f"release_{rel['tag']}_{stem}")
+    return base + ".parquet", base + ".json"
+
+
 def cache_paths(cat_path):
     key = "v{}_{}_{}".format(
         SCHEMA_VERSION, int(os.path.getmtime(cat_path)),
@@ -200,6 +267,31 @@ def _angsep_deg(ra1, dec1, ra2, dec2):
 def _unit_vectors(ra_deg, dec_deg):
     ra, dec = np.radians(np.asarray(ra_deg, float)), np.radians(np.asarray(dec_deg, float))
     return np.column_stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+
+
+def _make_meta(df, catalog, missing=()):
+    """Metadata sidecar (slider ranges, class counts) for a schema DataFrame —
+    used for built caches and for downloaded release-asset subsets alike."""
+    def rng(col, lo_q=0.5, hi_q=99.5):
+        if col not in df.columns:
+            return None
+        v = np.asarray(df[col].values, dtype=float)
+        v = v[np.isfinite(v)]
+        if not len(v):
+            return None
+        return [float(np.percentile(v, lo_q)), float(np.percentile(v, hi_q))]
+
+    return {
+        "catalog": str(catalog), "n_rows": int(len(df)),
+        "n_observed_us": (int((df["obs_cat"].astype(str) != "").sum())
+                          if "obs_cat" in df.columns else 0),
+        "n_lit_known": (int(df["lit_known"].sum())
+                        if "lit_known" in df.columns else 0),
+        "missing": list(missing),
+        "star_classes": {str(k): int(n) for k, n
+                         in df["star_class"].value_counts().items()},
+        "ranges": {c: rng(c) for c in RANGE_COLS},
+    }
 
 
 def classify_against_ledger(ra, dec, ledger, radius_arcsec=MATCH_RADIUS_ARCSEC):
@@ -288,23 +380,7 @@ def build_cache(cat_path, progress=None):
     df["star_class"] = df["star_class"].astype("category")
     df["obs_cat"] = df["obs_cat"].astype("category")
 
-    def rng(col, lo_q=0.5, hi_q=99.5):
-        v = df[col].values
-        v = v[np.isfinite(v)]
-        if not len(v):
-            return None
-        return [float(np.percentile(v, lo_q)), float(np.percentile(v, hi_q))]
-
-    meta = {
-        "catalog": cat_path, "n_rows": len(df),
-        "n_observed_us": int((df["obs_cat"] != "").sum()),
-        "n_lit_known": int(df["lit_known"].sum()),
-        "missing": missing,
-        "star_classes": df["star_class"].value_counts().to_dict(),
-        "ranges": {c: rng(c) for c in
-                   ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod",
-                    "mag_g")},
-    }
+    meta = _make_meta(df, cat_path, missing)
     os.makedirs(CACHE_DIR, exist_ok=True)
     pq, js = cache_paths(cat_path)
     df.to_parquet(pq, index=False)
@@ -657,29 +733,64 @@ def render():
                                "catalog roots for this deployment.")
 
     cats = find_catalogs(user=user, extra_globs=extras)
-    if not cats:
-        st.info("No MAGIC catalogs found (searched: {}). Configure paths in "
-                "st.secrets['catalogs'] — see secrets.toml.example."
-                .format(", ".join(resolve_globs(
+    rel = release_spec(_secrets())
+    options = {}   # display label -> ("local", path) | ("release", asset)
+    for n, p in cats.items():
+        options[f"{n}  ({os.path.getsize(p) / 1e9:.1f} GB)"] = ("local", p)
+    for a in (rel["assets"] if rel else []):
+        options[f"{a}@{rel['tag']}"] = ("release", a)
+    if not options:
+        st.info("No MAGIC catalogs found (searched: {}). Configure paths or a "
+                "release asset in st.secrets['catalogs'] — see "
+                "secrets.toml.example.".format(", ".join(resolve_globs(
                     _secrets(), user, os.environ.get("MAGIC_CATALOG_GLOBS")))))
         return
-    labels = {f"{n}  ({os.path.getsize(p) / 1e9:.1f} GB)": n for n, p in cats.items()}
-    default = next((i for i, n in enumerate(labels.values()) if n == DEFAULT_CATALOG), 0)
-    choice = st.selectbox("Catalog (version)", list(labels), index=default)
-    cat_path = cats[labels[choice]]
+    default = next((i for i, (kind, ref) in enumerate(options.values())
+                    if kind == "local"
+                    and os.path.basename(ref) == DEFAULT_CATALOG), 0)
+    choice = st.selectbox("Catalog (version)", list(options), index=default)
+    kind, ref = options[choice]
 
-    pq, js = cache_paths(cat_path)
-    if not (os.path.exists(pq) and os.path.exists(js)):
-        st.warning("No Parquet cache yet for this catalog (first use). Building it "
-                   "reads the whole FITS file once — a few minutes for multi-GB files. "
-                   f"You can also prebuild from a terminal:\n\n"
-                   f"`python3 explorer.py '{cat_path}'`")
-        if st.button("Build cache now"):
-            bar = st.progress(0.0)
-            build_cache(cat_path, progress=bar.progress)
-            bar.empty()
-            st.rerun()
-        return
+    if kind == "release":
+        # already explorer-schema Parquet: download once per container into
+        # the cache dir (the file on disk is the cache), then load normally
+        pq, js = release_paths(rel, ref)
+        if not os.path.exists(pq):
+            try:
+                with st.spinner(f"Downloading {ref} from the release ..."):
+                    bar = st.progress(0.0)
+                    fetch_release_asset(rel["repo"], rel["tag"], ref,
+                                        rel["token"], pq,
+                                        progress=bar.progress)
+                    bar.empty()
+            except Exception as e:
+                st.warning(f"Release catalog unavailable: {e} — "
+                           "the rest of the app keeps working.")
+                return
+        if not os.path.exists(js):
+            dfr = pd.read_parquet(pq)
+            need = {"ra", "dec", "feh", "star_class"}
+            if not need <= set(dfr.columns):
+                st.warning(f"{ref} is not an explorer-schema Parquet "
+                           f"(missing columns: {sorted(need - set(dfr.columns))}) "
+                           "— rebuild it with build_cloud_subset.py.")
+                return
+            with open(js, "w") as f:
+                json.dump(_make_meta(dfr, f"{ref}@{rel['tag']}"), f, indent=1)
+    else:
+        cat_path = ref
+        pq, js = cache_paths(cat_path)
+        if not (os.path.exists(pq) and os.path.exists(js)):
+            st.warning("No Parquet cache yet for this catalog (first use). Building it "
+                       "reads the whole FITS file once — a few minutes for multi-GB files. "
+                       f"You can also prebuild from a terminal:\n\n"
+                       f"`python3 explorer.py '{cat_path}'`")
+            if st.button("Build cache now"):
+                bar = st.progress(0.0)
+                build_cache(cat_path, progress=bar.progress)
+                bar.empty()
+                st.rerun()
+            return
     df, meta = _load_cached(pq, js)
     rng = {}
     for col, r in meta["ranges"].items():
