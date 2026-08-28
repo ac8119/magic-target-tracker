@@ -364,7 +364,8 @@ if check_login():
     workstation = feature_enabled("explorer")
     try:  # the explorer additionally needs local catalogs (+ astropy/pyarrow)
         import explorer
-        explorer_ok = workstation and bool(explorer.find_catalogs())
+        explorer_ok = workstation and bool(
+            explorer.find_catalogs(user=st.session_state.get("user")))
     except ImportError:
         explorer_ok = False
     st.sidebar.title("🔭 MAGIC Target Tracker")

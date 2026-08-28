@@ -23,11 +23,23 @@ A password-protected Streamlit app that lets anyone on the team:
 - `secrets.toml.example` — template for logins + optional Google Sheet queue
 
 ## Target-selection explorer (workstation)
-Both workstation pages (Target explorer, Follow-up progress) appear only
-when the local secrets set `[features] explorer = true` AND their data
-exists. The flag is default-closed — do **not** add it to the cloud
-deploy's secrets, so those pages stay internal even if data files are
-ever committed by accident.
+Both pages (Target explorer, Follow-up progress) appear only when the
+deployment's secrets set `[features] explorer = true` AND their data
+exists. The flag is default-closed: enable it only on deployments that
+have catalogs on disk and are intended for explorer access (e.g. a
+collaborator's server); leave it unset on the shared duplicate-checker
+deploy so the pages stay internal even if data files are ever committed
+by accident.
+
+Catalog discovery is per-deployment (see `secrets.toml.example`):
+`[catalogs] globs` lists search paths, `[catalogs.users]` adds per-login
+paths (merged first), `MAGIC_CATALOG_GLOBS` overrides for CLI/dev when
+no secrets are set, and Ani's workstation paths remain as a last-resort
+fallback in `explorer.py`. `allowed_roots` (optional, default-closed)
+enables a session-scoped "add catalog path" sidebar input restricted to
+those roots. Each catalog's first use writes a Parquet cache into
+`data/explorer_cache/` next to the app — allow ~10% of the FITS size in
+disk per catalog.
 
 Interactive cuts (sliders + typed min/max boxes, two-way synced; a
 "Fiducial cuts" button applies the standard giant selection from the

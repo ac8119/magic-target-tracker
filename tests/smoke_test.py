@@ -128,8 +128,28 @@ assert "[Fe/H] = -2.80" in detail and "literature-known" in detail, detail
 assert "SIMBAD" not in detail
 detail3 = explorer.star_detail(syn2, 3, sim)   # sim has row 3 (HD 1)
 assert "SIMBAD: HD 1" in detail3 and "GMOS" in detail3, detail3
+# per-user catalog globs + allowlisted runtime paths
+fake_secrets = {"catalogs": {
+    "globs": ["/data/magic/*.fits"],
+    "users": {"guy": ["/home/guy/cats/*.fits"]},
+    "allowed_roots": ["/data/magic"]}}
+assert explorer.resolve_globs(fake_secrets, user="guy") == \
+    ["/home/guy/cats/*.fits", "/data/magic/*.fits"]      # user first
+assert explorer.resolve_globs(fake_secrets, user="ani") == \
+    ["/data/magic/*.fits"]                               # no user entry
+assert explorer.resolve_globs({}, env_value="/a/*.fits:/b/*.fits") == \
+    ["/a/*.fits", "/b/*.fits"]                           # env when no secrets
+assert explorer.resolve_globs(fake_secrets, env_value="/a/*.fits") == \
+    ["/data/magic/*.fits"]                               # secrets beat env
+assert explorer.resolve_globs({}) == explorer.LOCAL_FALLBACK_GLOBS
+roots = fake_secrets["catalogs"]["allowed_roots"]
+assert explorer.path_allowed("/data/magic/deep/*.fits", roots)
+assert explorer.path_allowed("/data/magic", roots)
+assert not explorer.path_allowed("/etc/passwd", roots)
+assert not explorer.path_allowed("/data/magic/../../etc", roots)   # traversal
+assert not explorer.path_allowed("/data/magicother/x.fits", roots) # prefix trick
 print("OK  explorer cuts/metrics, category split, occupancy, SIMBAD stub, "
-      "selection helpers")
+      "selection helpers, per-user globs + path allowlist")
 
 # ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)

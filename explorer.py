@@ -35,11 +35,14 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCLUSION_CSV = os.path.join(APP_DIR, "data", "master_exclusion.csv")
 CACHE_DIR = os.path.join(APP_DIR, "data", "explorer_cache")
 
-CATALOG_GLOBS = os.environ.get("MAGIC_CATALOG_GLOBS", ":".join([
+# FALLBACK ONLY: Ani's workstation paths, used when neither
+# st.secrets["catalogs"] nor MAGIC_CATALOG_GLOBS is set (keeps a bare local
+# checkout working). Deployments configure paths in their own secrets.
+LOCAL_FALLBACK_GLOBS = [
     "~/Documents/Research/magic-validation/new_distances/*.fits",
     "~/Dropbox (MIT)/my_papers/magic_overview/raw_catalog_to_usable/*.fits",
     "~/Documents/Research/magic-scratch/cats/*.fits",
-])).split(":")
+]
 DEFAULT_CATALOG = "2025B_magic_noSMC_g195_ebv02_classified.fits"
 
 # local-volume-database copies searched in order (Pace's LVDB)
@@ -117,12 +120,61 @@ GI0_CANDS = [("g_dered", "i_dered"), ("mag_psf_g", "mag_psf_i")]
 
 
 # ──────────────────────── catalog discovery ────────────────────────
-def find_catalogs():
-    """{basename: path} of every FITS catalog on the configured search paths."""
+def resolve_globs(secrets, user=None, env_value=None):
+    """Catalog search globs, in precedence order:
+    1. secrets["catalogs"]: optional per-user globs under [catalogs.users]
+       (keyed by the password-gate login), merged user-first with the
+       deployment-wide "globs" list — the primary mechanism;
+    2. the MAGIC_CATALOG_GLOBS env var (colon-separated) for CLI/dev use;
+    3. LOCAL_FALLBACK_GLOBS.
+    `secrets` is any mapping shaped like st.secrets (testable directly)."""
+    try:
+        cats = secrets["catalogs"]
+    except (KeyError, FileNotFoundError, TypeError):
+        cats = {}
+    globs = []
+    users = cats.get("users", {})
+    if user and user in users:
+        globs += [str(g) for g in users[user]]
+    globs += [str(g) for g in cats.get("globs", [])]
+    if globs:
+        return globs
+    if env_value:
+        return [g for g in env_value.split(":") if g]
+    return list(LOCAL_FALLBACK_GLOBS)
+
+
+def path_allowed(path, allowed_roots):
+    """True if a user-entered path/glob stays inside an allowlisted root.
+    The non-wildcard prefix is resolved (symlinks, '..') before checking, so
+    web users cannot browse outside the roots a deployment explicitly opens."""
+    base = os.path.realpath(os.path.expanduser(str(path).split("*")[0]))
+    for root in allowed_roots:
+        r = os.path.realpath(os.path.expanduser(str(root))).rstrip(os.sep)
+        if base == r or base.startswith(r + os.sep):
+            return True
+    return False
+
+
+def _secrets():
+    try:
+        import streamlit as st
+        return st.secrets
+    except Exception:
+        return {}
+
+
+def find_catalogs(user=None, extra_globs=()):
+    """{basename: path} of every FITS catalog on the resolved search paths.
+    extra_globs: session-scoped, allowlist-validated paths added in the UI."""
+    pats = list(extra_globs) + resolve_globs(
+        _secrets(), user, os.environ.get("MAGIC_CATALOG_GLOBS"))
     out = {}
-    for pat in CATALOG_GLOBS:
-        for p in sorted(glob.glob(os.path.expanduser(pat))):
-            if os.path.getsize(p) > 1e6:          # skip tiny helper tables
+    for pat in pats:
+        p_exp = os.path.expanduser(pat)
+        for p in sorted(glob.glob(p_exp) if any(c in p_exp for c in "*?[")
+                        else glob.glob(os.path.join(p_exp, "*.fits"))):
+            if p.endswith(".fits") and os.path.getsize(p) > 1e6:
                 out.setdefault(os.path.basename(p), p)
     return out
 
@@ -580,10 +632,36 @@ def render():
     st = _st()
     st.header("Target-selection explorer")
 
-    cats = find_catalogs()
+    user = st.session_state.get("user")
+    extra_key = "explorer:extra_globs"
+    extras = st.session_state.get(extra_key, [])
+
+    # optional runtime path entry — shown ONLY when the deployment
+    # allowlists roots in secrets (default-closed, like the feature flag)
+    try:
+        allowed_roots = list(_secrets()["catalogs"]["allowed_roots"])
+    except (KeyError, FileNotFoundError, TypeError):
+        allowed_roots = []
+    if allowed_roots:
+        with st.sidebar.expander("Add catalog path (this session)"):
+            newp = st.text_input("Directory or glob under an allowed root",
+                                 key="explorer:addpath")
+            if st.button("Add path", key="explorer:addpath_btn") and newp:
+                if path_allowed(newp, allowed_roots):
+                    if newp not in extras:
+                        extras = extras + [newp]
+                        st.session_state[extra_key] = extras
+                    st.success("Added for this session.")
+                else:
+                    st.warning("Rejected: path is outside the allowed "
+                               "catalog roots for this deployment.")
+
+    cats = find_catalogs(user=user, extra_globs=extras)
     if not cats:
-        st.info("No MAGIC catalogs found on this machine "
-                "(searched: {}).".format(", ".join(CATALOG_GLOBS)))
+        st.info("No MAGIC catalogs found (searched: {}). Configure paths in "
+                "st.secrets['catalogs'] — see secrets.toml.example."
+                .format(", ".join(resolve_globs(
+                    _secrets(), user, os.environ.get("MAGIC_CATALOG_GLOBS")))))
         return
     labels = {f"{n}  ({os.path.getsize(p) / 1e9:.1f} GB)": n for n, p in cats.items()}
     default = next((i for i, n in enumerate(labels.values()) if n == DEFAULT_CATALOG), 0)
