@@ -373,7 +373,9 @@ def load_lvdb():
 # Implementation uses astroquery.xmatch (already installed; pure Python).
 
 SIMBAD_COLS = ["simbad_main_id", "simbad_main_type", "simbad_sep_arcsec"]
-SIMBAD_COLOR = "#b279a2"   # violet used for every "In SIMBAD" overlay
+SIMBAD_COLOR = "#2ca02c"   # green used for every "In SIMBAD" overlay
+                           # (violet was hard to read on the dmod histogram;
+                           # green kept everywhere for consistency)
 
 
 def run_simbad_xmatch(ra, dec, radius_arcsec=SIMBAD_RADIUS_ARCSEC):
@@ -713,10 +715,42 @@ def render():
                       help="From this session's checks plus the persistent "
                            "cache; run 'Check SIMBAD' to update.")
 
-        ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask}
+        import inspect
+        ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
+              # click-to-highlight: selected df row positions live under
+              # sel_key; the e_feh panel writes it (plotly selection events,
+              # Streamlit >= 1.35 only), the table panel consumes it
+              "sel_key": key + ":sel_rows",
+              "plotly_select": "on_select"
+                               in inspect.signature(st.plotly_chart).parameters}
         for title, fn in PANELS:
             st.subheader(title)
             fn(df, mask, ui)
+
+
+# ──────────────────── click-to-highlight helpers ────────────────────
+def move_selected_first(tab, sel_rows):
+    """Reorder a table view so selected df row positions come first.
+    Returns (reordered_tab, selected_rows_present_in_tab)."""
+    present = set(tab.index)
+    sel = [r for r in sel_rows if r in present]
+    if not sel:
+        return tab, []
+    return pd.concat([tab.loc[sel], tab.drop(index=sel)]), sel
+
+
+def star_detail(df, row, sim):
+    """One-line summary of a single star (df row position) for the table."""
+    r = df.iloc[row]
+    status = (str(r["obs_cat"]) if str(r["obs_cat"])
+              else ("literature-known" if bool(r["lit_known"]) else "unobserved"))
+    line = (f"**({r['ra']:.5f}, {r['dec']:.5f})** · g = {r['mag_g']:.2f} · "
+            f"[Fe/H] = {r['feh']:.2f} ± {r['e_feh']:.2f} · "
+            f"dmod = {r['dmod']:.2f} · {r['star_class']} · {status}")
+    if row in sim.index:
+        line += (f" · SIMBAD: {sim.loc[row, 'simbad_main_id']} "
+                 f"({sim.loc[row, 'simbad_main_type']})")
+    return line
 
 
 # ──────────────────────── linked panels ────────────────────────
@@ -826,7 +860,7 @@ def panel_dmod(df, mask, ui):
                 x=0.5 * (edges[:-1] + edges[1:]),
                 y=np.where(cnt3 > 0, cnt3, np.nan),   # gaps instead of log(0)
                 name="In SIMBAD", mode="lines",
-                line=dict(color=SIMBAD_COLOR, width=2, shape="hvh")))
+                line=dict(color=SIMBAD_COLOR, width=3, shape="hvh")))
         fig.update_layout(barmode="overlay", height=340,
                           margin=dict(l=10, r=10, t=10, b=10),
                           xaxis_title="distance modulus (per-class)",
@@ -837,37 +871,93 @@ def panel_dmod(df, mask, ui):
                    "(ambiguous/invalid stars have none).")
 
 
+CLICK_MAX = 20_000   # clickable-scatter cap on top of the density layer
+
+
 def panel_feh(df, mask, ui):
     import plotly.graph_objects as go
     st = ui["st"]
-    x = df["feh"].to_numpy()[mask]
-    y = df["e_feh"].to_numpy()[mask]
-    ok = np.isfinite(x) & np.isfinite(y)
-    fig = go.Figure()
-    if ok.any():
-        fig.add_trace(_density_or_scatter(go, x[ok], y[ok], "targets",
-                                          nbins=(240, 160)))
-        obs = mask & (np.asarray(df["obs_cat"]) != "")
-        xo, yo = df["feh"].to_numpy()[obs], df["e_feh"].to_numpy()[obs]
-        oko = np.isfinite(xo) & np.isfinite(yo)
-        if oko.any():
-            fig.add_trace(go.Scattergl(
-                x=xo[oko], y=yo[oko], mode="markers", name="observed by us",
-                marker=dict(symbol="x", size=7, color="#e45756")))
-        sm = ui["sim_mask"]
-        xs, ys = df["feh"].to_numpy()[sm], df["e_feh"].to_numpy()[sm]
-        oks = np.isfinite(xs) & np.isfinite(ys)
-        if oks.any():
-            fig.add_trace(go.Scattergl(
-                x=xs[oks], y=ys[oks], mode="markers", name="In SIMBAD",
-                marker=dict(symbol="diamond-open", size=8,
-                            color=SIMBAD_COLOR)))
-        fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                          xaxis_title="[Fe/H] (per-class)",
-                          yaxis_title="σ([Fe/H])")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
+    feh, e_feh = df["feh"].to_numpy(), df["e_feh"].to_numpy()
+    rows = np.flatnonzero(mask)
+    ok = np.isfinite(feh[rows]) & np.isfinite(e_feh[rows])
+    rows_ok = rows[ok]
+    if not len(rows_ok):
         st.caption("No finite [Fe/H] values in the current selection.")
+        return
+
+    ui["click_note"] = ""
+    fig = go.Figure()
+    if len(rows_ok) > SCATTER_MAX:
+        H, xe, ye = np.histogram2d(feh[rows_ok], e_feh[rows_ok],
+                                   bins=(240, 160))
+        fig.add_trace(go.Heatmap(
+            x=0.5 * (xe[:-1] + xe[1:]), y=0.5 * (ye[:-1] + ye[1:]),
+            z=np.where(H.T > 0, np.log10(H.T, where=H.T > 0), np.nan),
+            colorscale="Viridis", colorbar=dict(title="log₁₀ N"),
+            name="targets"))
+        # clicks need points: decimated, display-only clickable layer
+        pick = np.random.default_rng(0).choice(len(rows_ok), CLICK_MAX,
+                                               replace=False)
+        rows_click = rows_ok[pick]
+        ui["click_note"] = (f"clickable layer decimated to {CLICK_MAX:,} of "
+                            f"{len(rows_ok):,} points (display-only)")
+        fig.add_trace(go.Scattergl(
+            x=feh[rows_click], y=e_feh[rows_click], mode="markers",
+            customdata=rows_click, showlegend=False, name="targets",
+            marker=dict(size=3, color="rgba(76,120,168,0.25)")))
+    else:
+        fig.add_trace(go.Scattergl(
+            x=feh[rows_ok], y=e_feh[rows_ok], mode="markers", name="targets",
+            customdata=rows_ok,
+            marker=dict(size=2, color="#4c78a8", opacity=0.5)))
+
+    obs_rows = np.flatnonzero(mask & (np.asarray(df["obs_cat"]) != ""))
+    obs_rows = obs_rows[np.isfinite(feh[obs_rows]) & np.isfinite(e_feh[obs_rows])]
+    if len(obs_rows):
+        fig.add_trace(go.Scattergl(
+            x=feh[obs_rows], y=e_feh[obs_rows], mode="markers",
+            name="observed by us", customdata=obs_rows,
+            marker=dict(symbol="x", size=7, color="#e45756")))
+    sim_rows = np.flatnonzero(ui["sim_mask"])
+    sim_rows = sim_rows[np.isfinite(feh[sim_rows]) & np.isfinite(e_feh[sim_rows])]
+    if len(sim_rows):
+        fig.add_trace(go.Scattergl(
+            x=feh[sim_rows], y=e_feh[sim_rows], mode="markers",
+            name="In SIMBAD", customdata=sim_rows,
+            marker=dict(symbol="diamond-open", size=8, color=SIMBAD_COLOR)))
+    fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
+                      xaxis_title="[Fe/H] (per-class)",
+                      yaxis_title="σ([Fe/H])")
+
+    # click / box / lasso selection -> highlight in the target table.
+    # st.plotly_chart selection events exist from Streamlit 1.35 on; on older
+    # versions the plot stays static and we say so rather than emulating it.
+    sel_key = ui["sel_key"]
+    if ui["plotly_select"]:
+        ck = ui["key"] + ":feh_sel"
+        if st.session_state.get(sel_key) and st.button(
+                "Clear selection", key=ui["key"] + ":sel_clear"):
+            st.session_state[sel_key] = []
+            st.session_state.pop(ck, None)   # resets the chart's selection
+        ev = st.plotly_chart(fig, use_container_width=True, key=ck,
+                             on_select="rerun",
+                             selection_mode=("points", "box", "lasso"))
+        picked = []
+        for p in getattr(getattr(ev, "selection", None), "points", []) or []:
+            v = p.get("customdata")
+            if isinstance(v, (list, tuple)):
+                v = v[0] if v else None
+            if v is not None:
+                picked.append(int(v))
+        st.session_state[sel_key] = sorted(set(picked))
+        st.caption("Click a star (or box/lasso-select) to highlight it in "
+                   "the target table below.")
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+        import streamlit as _stmod
+        st.caption(f"Click-to-highlight needs Streamlit ≥ 1.35 (installed: "
+                   f"{_stmod.__version__}) — `pip install -U streamlit` "
+                   "to enable it.")
 
 
 def panel_table(df, mask, ui):
@@ -892,12 +982,28 @@ def panel_table(df, mask, ui):
     if st.checkbox("show only SIMBAD matches", key=ui["key"] + ":tab_sim",
                    disabled=not tab["in_simbad"].any()):
         tab = tab[tab["in_simbad"]]
+
+    # click-to-highlight: selected stars jump to the top with a detail line
+    sel_rows = st.session_state.get(ui["sel_key"], [])
+    tab, sel = move_selected_first(tab, sel_rows)
+    for r in sel[:5]:
+        st.markdown(star_detail(df, r, ui["sim"]))
+    if len(sel) > 5:
+        st.caption(f"... and {len(sel) - 5} more selected rows")
+    if ui.get("click_note") and sel:
+        st.caption(ui["click_note"])
+
     disp = tab.head(5000)
-    if 0 < len(disp) <= 2000 and disp["in_simbad"].any():
-        # subtle violet row tint — Styler is cheap at this size, skipped above it
-        st.dataframe(disp.style.apply(
-            lambda r: ["background-color: rgba(178,121,162,0.15)" * r["in_simbad"]]
-                      * len(r), axis=1), use_container_width=True)
+    sel_set = set(sel)
+    if 0 < len(disp) <= 2000 and (sel_set or disp["in_simbad"].any()):
+        # row tints — Styler is cheap at this size, skipped above it
+        def _tint(r):
+            if r.name in sel_set:
+                return ["background-color: rgba(255,193,7,0.30)"] * len(r)
+            if r["in_simbad"]:
+                return ["background-color: rgba(44,160,44,0.15)"] * len(r)
+            return [""] * len(r)
+        st.dataframe(disp.style.apply(_tint, axis=1), use_container_width=True)
     else:
         st.dataframe(disp, use_container_width=True)
     if n > 5000:

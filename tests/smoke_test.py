@@ -116,7 +116,20 @@ try:
     assert back.iloc[0]["simbad_main_id"] == "HD 1"
 finally:
     explorer.SIMBAD_CACHE_CSV = _orig
-print("OK  explorer cuts/metrics, category split, occupancy, SIMBAD stub")
+# click-to-highlight helpers: selection state -> table ordering + detail
+tab = syn.loc[[0, 3, 5], ["ra", "dec", "feh"]]
+tab2, sel = explorer.move_selected_first(tab, [5, 999])
+assert sel == [5] and tab2.index.tolist() == [5, 0, 3], tab2.index.tolist()
+tab3, sel3 = explorer.move_selected_first(tab, [])
+assert sel3 == [] and tab3.index.tolist() == [0, 3, 5]
+syn2 = syn.assign(mag_g=17.0, dmod=16.5)
+detail = explorer.star_detail(syn2, 5, sim)
+assert "[Fe/H] = -2.80" in detail and "literature-known" in detail, detail
+assert "SIMBAD" not in detail
+detail3 = explorer.star_detail(syn2, 3, sim)   # sim has row 3 (HD 1)
+assert "SIMBAD: HD 1" in detail3 and "GMOS" in detail3, detail3
+print("OK  explorer cuts/metrics, category split, occupancy, SIMBAD stub, "
+      "selection helpers")
 
 # ── 3. the app renders the progress page ──
 at = AppTest.from_file(os.path.join(BASE, "app.py"), default_timeout=60)
@@ -190,6 +203,8 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
          "simbad_main_type": ["Star"] * 5,
          "simbad_sep_arcsec": [0.1] * 5}, index=seed_pos)
     at2.session_state[f"{ekey}:simbad:queried"] = set()
+    # seed a click-selection: the third stubbed SIMBAD star
+    at2.session_state[f"{ekey}:sel_rows"] = [int(seed_pos[2])]
 
     fbtn = next(b for b in at2.button if b.label == "Fiducial cuts")
     fbtn.click().run()
@@ -215,6 +230,14 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     tab = at2.dataframe[0].value
     assert "in_simbad" in tab.columns and int(tab["in_simbad"].sum()) == 5,         tab.columns.tolist()
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
+
+    # the seeded selection is first in the table, with a detail line above it
+    assert tab.index[0] == int(seed_pos[2]), (tab.index[:3], seed_pos)
+    assert bool(tab.iloc[0]["in_simbad"]) and \
+        tab.iloc[0]["simbad_main_id"] == "FAKE 2", tab.iloc[0]
+    details = " ".join(str(m.value) for m in at2.markdown)
+    assert "SIMBAD: FAKE 2" in details, "detail line missing"
+    print("OK  click-selection state puts the star first with a detail line")
 
     # Clear all disables every cut again
     next(b for b in at2.button if b.label == "Clear all").click().run()
