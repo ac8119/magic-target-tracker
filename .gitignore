@@ -1,3 +1,17 @@
 .streamlit/secrets.toml
 data/queue.csv
 __pycache__/
+
+# workstation ingestion output: 11k+ unpublished proposed-target coordinates.
+# The repo is public - only commit this if you are OK with it being world-readable
+# (needed for the cloud deploy to show the Follow-up progress page).
+data/target_runs.csv
+
+# explorer parquet caches (derived from local catalogs - never commit coordinates)
+data/explorer_cache/
+
+# on-demand SIMBAD X-Match results (coordinates - public repo, keep local)
+data/simbad_cache.csv
+
+# cloud subset outputs (upload to a private release, never commit)
+*_cloud_subset.parquet

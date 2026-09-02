@@ -12,7 +12,94 @@ A password-protected Streamlit app that lets anyone on the team:
 - `build_exclusion_master.py` — regenerates `data/master_exclusion.csv` from the
   four source ledgers. **Re-run after every observing run / GMOS export update.**
 - `data/master_exclusion.csv` — merged observed table the app reads
+- `build_followup_progress.py` — workstation ingestion: reads the dated target
+  runs in `magic_targets/` and the observed catalogs in `magic_obs/` (from
+  `$MAGIC_FOLLOWUP_DIR`, default `~/Documents/Research/magic-low-metallicity-followup`),
+  cross-matches at 1", and writes `data/target_runs.csv` for the
+  **Follow-up progress** page. Re-run after every observing run / target selection.
+- `data/target_runs.csv` — per-run target status table (git-ignored: the repo is
+  public and this holds unpublished proposed-target coordinates)
+- `tests/smoke_test.py` — end-to-end check of the ingestion + progress page
 - `secrets.toml.example` — template for logins + optional Google Sheet queue
+
+## Target-selection explorer (workstation)
+Both pages (Target explorer, Follow-up progress) appear only when the
+deployment's secrets set `[features] explorer = true` AND their data
+exists. The flag is default-closed: enable it only on deployments that
+have catalogs on disk and are intended for explorer access (e.g. a
+collaborator's server); leave it unset on the shared duplicate-checker
+deploy so the pages stay internal even if data files are ever committed
+by accident.
+
+### Explorer on Streamlit Community Cloud (release-asset catalog)
+The multi-GB FITS catalogs can't ship to the cloud; host a pre-cut
+explorer-schema subset as a private GitHub release asset instead:
+1. `python3 build_cloud_subset.py` — cuts the default catalog to valid-
+   [Fe/H] RGB/MS rows and the explorer's columns (2025B: 5.6M rows,
+   320 MB zstd Parquet, ~330 MB in RAM — inside the ~1 GB cloud budget;
+   tighten with `--cut "... and feh < -1.0"` if a bigger catalog busts it).
+2. Put it in a PRIVATE data repo release:
+   `gh release create v1 *_cloud_subset.parquet --repo you/magic-data`
+3. Make a fine-grained PAT scoped to that one repo, Contents: read-only.
+4. In the Streamlit dashboard's Secrets box add (alongside credentials
+   and `[features] explorer = true`):
+   ```
+   [catalogs.release]
+   repo = "you/magic-data"
+   tag = "v1"
+   asset = "2025B_magic_noSMC_g195_ebv02_classified_cloud_subset.parquet"
+   token = "github_pat_..."
+   ```
+   (`asset` may be a list to offer several versions.)
+5. The explorer lists the asset as `asset@tag`; the first selection per
+   container streams it into `data/explorer_cache/` (progress bar) and
+   every later load is instant. Download failures show the HTTP status
+   and never the token.
+
+Catalog discovery is per-deployment (see `secrets.toml.example`):
+`[catalogs] globs` lists search paths, `[catalogs.users]` adds per-login
+paths (merged first), `MAGIC_CATALOG_GLOBS` overrides for CLI/dev when
+no secrets are set, and Ani's workstation paths remain as a last-resort
+fallback in `explorer.py`. `allowed_roots` (optional, default-closed)
+enables a session-scoped "add catalog path" sidebar input restricted to
+those roots. Each catalog's first use writes a Parquet cache into
+`data/explorer_cache/` next to the app — allow ~10% of the FITS size in
+disk per catalog.
+
+Interactive cuts (sliders + typed min/max boxes, two-way synced; a
+"Fiducial cuts" button applies the standard giant selection from the
+FIDUCIAL dict in explorer.py) over a full MAGIC catalog with linked panels
+(on-sky in RA/Dec or Galactic l/b with LVDB dwarfs + MW star clusters
+within 300 kpc and already-observed stars overplotted, distance-modulus
+histogram, [Fe/H] vs uncertainty, a filtered-target table), LMC/SMC
+excision circles, and headline counts split by ledger category (observed
+by us vs literature-known, 1" match; a checkbox controls whether
+literature counts as observed). LVDB markers appear only where the
+filtered stars actually are (2 deg occupancy pixels). A "Check SIMBAD"
+button cross-matches the filtered set (<=50k rows) against SIMBAD via
+the CDS X-Match at 1" — on demand only, cached per session and in the
+git-ignored data/simbad_cache.csv.
+```bash
+python3 explorer.py /path/to/catalog.fits   # optional: prebuild the Parquet cache
+streamlit run app.py                        # sidebar page: "Target explorer"
+```
+Catalogs are discovered via `MAGIC_CATALOG_GLOBS` (colon-separated globs; see
+`explorer.py` for the defaults) and the filename acts as the version label.
+First use of a catalog builds a column-pruned Parquet cache under
+`data/explorer_cache/` (git-ignored); filtering always runs over the full
+cached table and only the display decimates. Needs astropy, pyarrow, scipy,
+and plotly (workstation only — the cloud deploy hides the page when no
+catalogs are found). `data/lvdb/` holds the LVDB globular-cluster tables;
+dwarfs are read from the local LVDB checkout (`MAGIC_LVDB_DIR`).
+
+## Follow-up progress (workstation)
+```bash
+python3 build_followup_progress.py   # needs astropy; ~30 s
+python3 tests/smoke_test.py          # optional sanity check
+streamlit run app.py                 # new sidebar page: "Follow-up progress"
+```
+The page appears only when `data/target_runs.csv` exists, so the cloud deploy
+is unaffected until you decide to commit that file.
 
 ## Run locally
 ```bash

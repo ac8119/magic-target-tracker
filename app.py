@@ -20,6 +20,7 @@ import streamlit as st
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCLUSION_CSV = os.path.join(APP_DIR, "data", "master_exclusion.csv")
+TARGET_RUNS_CSV = os.path.join(APP_DIR, "data", "target_runs.csv")
 QUEUE_CSV = os.path.join(APP_DIR, "data", "queue.csv")
 QUEUE_COLS = ["name", "ra", "dec", "instrument", "priority", "notes",
               "added_by", "added_utc", "status"]
@@ -62,6 +63,16 @@ def check_login():
     return False
 
 
+def feature_enabled(name):
+    """Workstation-only feature flag: st.secrets['features'][name].
+    A missing section or key means DISABLED (default-closed), so the cloud
+    deploy hides flagged pages even if their data files ever end up there."""
+    try:
+        return bool(st.secrets["features"][name])
+    except (KeyError, FileNotFoundError):
+        return False
+
+
 # ──────────────────────── coordinate utils ────────────────────────
 def parse_coord(text):
     """Parse 'ra dec' in decimal degrees or HMS/DMS (colon- or space-separated).
@@ -97,6 +108,17 @@ def angsep_arcsec(ra1, dec1, ra2, dec2):
 @st.cache_data
 def load_exclusion():
     df = pd.read_csv(EXCLUSION_CSV)
+    df["name"] = df["name"].fillna("")
+    return df
+
+
+@st.cache_data
+def load_progress():
+    """Per-run target status table written by build_followup_progress.py,
+    or None if the ingestion has not been run on this machine."""
+    if not os.path.exists(TARGET_RUNS_CSV):
+        return None
+    df = pd.read_csv(TARGET_RUNS_CSV)
     df["name"] = df["name"].fillna("")
     return df
 
@@ -276,6 +298,47 @@ def page_queue(excl, queue):
         st.info("Queue is empty.")
 
 
+def page_progress(prog):
+    st.header("Low-metallicity follow-up progress")
+    st.markdown(
+        "Every target proposed in the dated `magic_targets/` runs, cross-matched "
+        "(1\" — the MAGIC convention) against the observed database and the "
+        "literature. Regenerate with `python3 build_followup_progress.py` after "
+        "each observing run or new selection.")
+
+    uniq = prog[~prog["in_earlier_run"]]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Unique targets proposed", f"{len(uniq):,}")
+    c2.metric("Observed", f"{(uniq['status'] == 'observed').sum():,}")
+    c3.metric("Literature-known", f"{(uniq['status'] == 'literature-known').sum():,}")
+    c4.metric("Still to observe", f"{(uniq['status'] == 'proposed').sum():,}")
+
+    st.subheader("Per run")
+    summ = (prog.groupby("run", sort=False)["status"]
+            .value_counts().unstack(fill_value=0)
+            .reindex(columns=["observed", "literature-known", "proposed"], fill_value=0))
+    summ.insert(0, "targets", summ.sum(axis=1))
+    summ["% observed"] = (100 * summ["observed"] / summ["targets"]).round(1)
+    st.dataframe(summ, use_container_width=True)
+
+    st.subheader("Targets")
+    c1, c2, c3 = st.columns(3)
+    runs = c1.multiselect("Run", list(prog["run"].unique()))
+    stats = c2.multiselect("Status", ["observed", "literature-known", "proposed"])
+    search = c3.text_input("Name contains")
+    view = prog
+    if runs:
+        view = view[view["run"].isin(runs)]
+    if stats:
+        view = view[view["status"].isin(stats)]
+    if search:
+        view = view[view["name"].str.contains(search, case=False, na=False)]
+    st.caption(f"{len(view):,} rows")
+    st.dataframe(view, use_container_width=True)
+    st.download_button("Download CSV", view.to_csv(index=False).encode(),
+                       "followup_progress.csv", "text/csv")
+
+
 def page_browse(excl):
     st.header("Browse the observed-star database")
     c1, c2 = st.columns(2)
@@ -295,9 +358,24 @@ def page_browse(excl):
 if check_login():
     excl = load_exclusion()
     queue = load_queue()
+    prog = load_progress()
+    # workstation-only pages: gated on the [features] explorer flag in the
+    # local secrets AND on their data existing (cloud deploy: flag unset)
+    workstation = feature_enabled("explorer")
+    try:  # the explorer additionally needs local catalogs (+ astropy/pyarrow)
+        import explorer
+        explorer_ok = workstation and bool(
+            explorer.find_catalogs(user=st.session_state.get("user")))
+    except ImportError:
+        explorer_ok = False
     st.sidebar.title("🔭 MAGIC Target Tracker")
     st.sidebar.markdown(f"Logged in as **{st.session_state['user']}**")
-    page = st.sidebar.radio("Page", ["Check targets", "Queue", "Browse observed"])
+    pages = ["Check targets", "Queue", "Browse observed"]
+    if explorer_ok:
+        pages.append("Target explorer")
+    if workstation and prog is not None:
+        pages.append("Follow-up progress")
+    page = st.sidebar.radio("Page", pages)
     st.sidebar.markdown("---")
     st.sidebar.caption(
         "Observed database: {:,} positions\n\n"
@@ -314,5 +392,9 @@ if check_login():
         page_check(excl, queue)
     elif page == "Queue":
         page_queue(excl, queue)
+    elif page == "Target explorer":
+        explorer.render()
+    elif page == "Follow-up progress":
+        page_progress(prog)
     else:
         page_browse(excl)
