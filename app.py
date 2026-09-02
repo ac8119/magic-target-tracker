@@ -362,10 +362,11 @@ if check_login():
     # workstation-only pages: gated on the [features] explorer flag in the
     # local secrets AND on their data existing (cloud deploy: flag unset)
     workstation = feature_enabled("explorer")
-    try:  # the explorer additionally needs local catalogs (+ astropy/pyarrow)
+    try:  # the explorer needs either local catalogs or a release-asset catalog
         import explorer
         explorer_ok = workstation and bool(
-            explorer.find_catalogs(user=st.session_state.get("user")))
+            explorer.find_catalogs(user=st.session_state.get("user"))
+            or explorer.release_spec(explorer._secrets()))
     except ImportError:
         explorer_ok = False
     st.sidebar.title("🔭 MAGIC Target Tracker")
