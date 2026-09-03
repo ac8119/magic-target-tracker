@@ -174,9 +174,9 @@ switch to a boolean mask.
 On the laptop that is 986 MB across two files in `data/explorer_cache/`.
 Check for the equivalent on the workstation and delete.
 
-## 6. Commit the pending work
+## 6. Already on `main` — pull before starting
 
-Uncommitted in the working tree:
+Committed in `3b25a24`, so `git pull` picks it all up:
 
 - `explorer.py` — LVDB `r_h` proximity flag, distance-in-pc slider,
   `star_class` checkboxes + "Assumed [Fe/H], dmod values" selector, quality
@@ -185,14 +185,7 @@ Uncommitted in the working tree:
   dwarfs and the dwarf overlay and the `r_h` flag are silently empty, locally
   and on the cloud
 
-## 7. Rotate the exposed GitHub PAT
-
-The `[catalogs.release]` token for the private `ac8119/magic-target-data` repo
-was pasted into a chat transcript and must be considered compromised. Revoke
-at github.com/settings/tokens, issue a new one, and update **both** the
-Streamlit Cloud Secrets box and the local `.streamlit/secrets.toml`. The
-release-fetch path itself is verified working (HTTP 200, asset name matches),
-so a fresh token drops straight in.
+Nothing to commit here; listed so the file inventory is unambiguous.
 
 ---
 
