@@ -72,7 +72,7 @@ SCHEMA_VERSION = 5
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
 HARD_BOUNDS = {"pmra": (-30, 30), "pmdec": (-30, 30), "ebv": (0, 1),
                "gi0": (-2, 5), "feh": (-5, 2), "e_feh": (0, 5),
-               "dmod": (0, 25), "mag_g": (10, 25)}
+               "dmod": (0, 25), "mag_g": (10, 25), "magerr_cahk": (0, 2)}
 
 
 def dmod_to_pc(dmod):
@@ -93,8 +93,11 @@ def pc_to_dmod(pc):
 # target-selection page is rendered straight from this list, so editing a rule
 # here updates both the filtering and what the page claims it did.
 PRESELECT = [
-    ("source_id", "has a Gaia source_id (sentinel 999999 dropped)",
-     lambda d: d["source_id"] != GAIA_NO_MATCH),
+    # real Gaia DR3 ids are >= 2^35, so "> 999999" rejects every no-match
+    # encoding seen so far: 999999 (laptop copy), 0, and the masked-int64
+    # fill INT64_MIN that astropy surfaces from the mpflags lite files
+    ("source_id", "has a Gaia source_id (no-match sentinels dropped)",
+     lambda d: np.asarray(d["source_id"], dtype=np.int64) > GAIA_NO_MATCH),
     ("extended_class_g", "extended_class_g in (0, 1) — drops galaxies and -9",
      lambda d: np.isin(d["extended_class_g"], (0, 1))),
     ("mag_psf_cahk", "valid CaHK photometry: 0 < mag_psf_cahk < 30",
@@ -105,10 +108,25 @@ PRESELECT = [
     ("ebv_sfd98", "E(B-V) <= 0.2 (SFD98)",
      lambda d: np.isfinite(d["ebv_sfd98"]) & (d["ebv_sfd98"] <= EBV_MAX)),
 ]
-GAIA_NO_MATCH = 999999   # source_id sentinel for "no Gaia cross-match"
+GAIA_NO_MATCH = 999999   # ids at or below this are "no Gaia cross-match"
 EBV_MAX = 0.2
 CAHK_MIN = 0.0
 CAHK_MAX = 30.0
+
+
+def apply_preselect(d, names, n_rows, counts=None):
+    """Boolean keep-mask from every PRESELECT rule whose column exists in
+    `names`, applied in order to the column mapping `d` (a FITS record chunk
+    or any dict of arrays). If `counts` is given, it accumulates the
+    cumulative survivor count after each rule — the four-cut chain."""
+    keep = np.ones(n_rows, dtype=bool)
+    for col, rule, pred in PRESELECT:
+        if col not in names:
+            continue
+        keep &= np.asarray(pred(d), dtype=bool)
+        if counts is not None:
+            counts[rule] = counts.get(rule, 0) + int(keep.sum())
+    return keep
 
 
 def preselect_note():
@@ -158,11 +176,11 @@ SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
                   "feh_ext",
                   "feh_rgb", "e_feh_rgb", "dmod_rgb", "feh_ext_rgb",
                   "feh_ms", "e_feh_ms", "dmod_ms", "feh_ext_ms",
-                  "broadband_valid", "gaia_var_flag"]
+                  "broadband_valid", "gaia_var_flag", "magerr_cahk"]
 RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g",
               "feh_rgb", "e_feh_rgb", "dmod_rgb",
               "feh_ms", "e_feh_ms", "dmod_ms",
-              "broadband_valid", "gaia_var_flag")
+              "broadband_valid", "gaia_var_flag", "magerr_cahk")
 
 # canonical column -> catalog column candidates (first match wins)
 CANDS = {
@@ -186,6 +204,8 @@ CANDS = {
     # no such column, which disables the corresponding UI cut)
     "broadband_valid": ["broadband_valid"],
     "gaia_var_flag": ["gaia_var_flag"],
+    # CaHK magnitude error: the mpflags lite catalogs call it MAGERR_PSF
+    "magerr_cahk": ["magerr_psf_cahk", "MAGERR_PSF"],
 }
 
 # "Assumed [Fe/H], dmod values" -> column suffix ("" = as stored, i.e. the
@@ -402,12 +422,23 @@ def build_cache(cat_path, progress=None):
               else pd.DataFrame(columns=["ra", "dec", "category"]))
 
     frames, missing = [], []
+    pres_counts, n_total = {}, 0
     with fits.open(cat_path, memmap=True) as hdul:
         hdu = hdul[1]
         n = hdu.header["NAXIS2"]
         names = set(hdu.columns.names)
+        pres_skipped = [rule for col, rule, _ in PRESELECT if col not in names]
         for start in range(0, n, CHUNK):
             rec = hdu.data[start:start + CHUNK]
+            n_total += len(rec)
+            # pre-selection happens HERE, before the schema frame exists,
+            # so the page's "already applied" note is actually true
+            keep = apply_preselect(rec, names, len(rec), pres_counts)
+            rec = rec[keep]
+            if not len(rec):
+                if progress:
+                    progress(min(1.0, (start + CHUNK) / n))
+                continue
             cols = {}
             for canon, cands in CANDS.items():
                 src = next((c for c in cands if c in names), None)
@@ -428,7 +459,11 @@ def build_cache(cat_path, progress=None):
             if "star_class" in names:
                 sc = np.char.strip(rec["star_class"].astype(str))
             elif "is_rgb" in names:
-                sc = np.where(rec["is_rgb"], "RGB", "MS")
+                # is_rgb alone cannot classify a star with no [Fe/H] solution
+                # (both branch values are NaN there) — those must not be
+                # mislabeled RGB/MS, so they get their own class
+                sc = np.where(~np.isfinite(cols["feh"]), "no-feh",
+                              np.where(rec["is_rgb"], "RGB", "MS"))
             else:
                 sc = np.full(len(rec), "unknown")
             cols["star_class"] = sc
@@ -447,11 +482,22 @@ def build_cache(cat_path, progress=None):
             if progress:
                 progress(min(1.0, (start + len(rec)) / n))
 
+    if not frames:
+        raise RuntimeError("pre-selection removed every row — wrong catalog?")
     df = pd.concat(frames, ignore_index=True)
     df["star_class"] = df["star_class"].astype("category")
     df["obs_cat"] = df["obs_cat"].astype("category")
 
+    print(f"pre-selection: {n_total:,} rows in")
+    for col, rule, _ in PRESELECT:
+        if col in names:
+            print(f"  + {rule}: {pres_counts[rule]:,}")
+    for rule in pres_skipped:
+        print(f"  ! skipped (column absent): {rule}")
+
     meta = _make_meta(df, cat_path, missing)
+    meta["preselect"] = {"n_input": int(n_total), "chain": pres_counts,
+                         "skipped": pres_skipped}
     os.makedirs(CACHE_DIR, exist_ok=True)
     pq, js = cache_paths(cat_path)
     df.to_parquet(pq, index=False)
@@ -1064,7 +1110,9 @@ def render():
         for col, label, fmt, lo in (("ebv", "E(B-V) max", "%.3f", 0.0),
                                     ("e_feh", "[Fe/H] error max", "%.2f", 0.0),
                                     ("mag_g", "depth: g max (mag_psf_g)",
-                                     "%.2f", None)):
+                                     "%.2f", None),
+                                    ("magerr_cahk", "depth: σ(CaHK) max",
+                                     "%.3f", 0.0)):
             if rng.get(col):
                 bounds = (rng[col][0] if lo is None else lo, rng[col][1])
                 on, val = _thresh_cut(st, label, bounds, f"{key}:{col}", fmt)

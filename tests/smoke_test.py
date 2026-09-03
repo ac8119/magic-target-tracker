@@ -148,6 +148,26 @@ assert explorer.path_allowed("/data/magic", roots)
 assert not explorer.path_allowed("/etc/passwd", roots)
 assert not explorer.path_allowed("/data/magic/../../etc", roots)   # traversal
 assert not explorer.path_allowed("/data/magicother/x.fits", roots) # prefix trick
+# PRESELECT: predicates + cumulative chain on a synthetic record chunk
+INT64_MIN = np.iinfo(np.int64).min   # masked-int64 fill in the mpflags files
+rec = {
+    "source_id":        np.array([999999, 10**12, 10**12, 10**12, 10**12,
+                                  10**12, INT64_MIN]),
+    "extended_class_g": np.array([1, -9, 0, 1, 1, 2, 1]),
+    "mag_psf_cahk":     np.array([18.0, 18.0, 1e20, 17.0, 95.0, 18.0, 18.0]),
+    "ebv_sfd98":        np.array([0.05, 0.05, 0.05, 0.30, 0.05, 0.05, 0.05]),
+}
+counts = {}
+keep = explorer.apply_preselect(rec, set(rec), 7, counts)
+# row0 999999 sentinel; row1 extended -9; row2 CaHK 1e20 sentinel;
+# row3 ebv 0.30; row4 CaHK >90 placeholder; row5 extended 2; row6 masked id
+assert keep.tolist() == [False] * 7, keep.tolist()
+assert list(counts.values()) == [5, 3, 1, 0], counts
+# a rule whose column is absent is skipped, not fatal
+keep2 = explorer.apply_preselect(rec, {"ebv_sfd98"}, 7, None)
+assert keep2.tolist() == [True, True, True, False, True, True, True]
+print("OK  PRESELECT predicates + cumulative chain")
+
 # cloud subset maker: cut + schema columns + roundtrip through the loader
 import tempfile as _tf
 from build_cloud_subset import make_subset
@@ -254,17 +274,23 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert "Literature-known" in em and "In SIMBAD" in em, em
     print(f"OK  app 'Target explorer' page renders: {em}")
 
-    # exactly one population control (radio), no star_class multiselect
-    pop_radios = [r for r in at2.radio if "Population" in (r.label or "")]
-    assert len(pop_radios) == 1, "expected a single population radio"
-    assert list(pop_radios[0].options) == ["RGB", "MS", "both",
-                                           "include ambiguous"], pop_radios[0].options
+    # classification UI: star_class checkboxes (RGB/MS on, ambiguous off)
+    # plus the per-class "Assumed" radio; no multiselect
+    ck = {c.key: c.value for c in at2.checkbox}
+    for cls, default in (("RGB", True), ("MS", True), ("ambiguous", False)):
+        k = next(k for k in ck if k.endswith(f":cls:{cls}"))
+        assert ck[k] == default, (k, ck[k])
+    assumed = [r for r in at2.radio if "Assumed" in (r.label or "")]
+    assert len(assumed) == 1, "expected the Assumed [Fe/H], dmod radio"
+    assert list(assumed[0].options) == ["Matching star_class", "RGB", "MS"], \
+        assumed[0].options
     assert not at2.multiselect, "star_class multiselect should be gone"
-    # every cut has typed number boxes; the depth cut is now mag_psf_g
+    # every cut has typed number boxes; depth cuts are mag_g + sigma(CaHK)
     keys = {n.key for n in at2.number_input}
     assert any(k.endswith(":feh:lo") for k in keys), keys
     assert any(k.endswith(":mag_g:box") for k in keys), keys
-    assert not any("magerr" in k for k in keys), "magerr widgets should be gone"
+    assert any(k.endswith(":magerr_cahk:box") for k in keys), keys
+    assert not any(":magerr_g" in k for k in keys), "old magerr_g widget back?"
 
     # the Fiducial preset must reproduce apply_cuts with the FIDUCIAL values
     # (derive the cache path exactly as the app does — a stale cache from an
@@ -272,16 +298,25 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     pqf, _ = explorer.cache_paths(explorer.find_catalogs()[explorer.DEFAULT_CATALOG])
     assert os.path.exists(pqf), f"cache missing for default catalog: {pqf}"
     cat = pd.read_parquet(pqf)
+    # mirror the render pipeline: re-assume the fiducial class first, cut on
+    # the swapped columns, and turn the pc range into a dmod range
+    cat_a = explorer.assume_class(cat, explorer.FIDUCIAL["assumed"])
     fid = [{"col": "star_class", "kind": "isin",
             "value": [explorer.FIDUCIAL["population"]], "enabled": True}]
     for col, val in explorer.FIDUCIAL.items():
-        if col == "population":
+        if col in ("population", "assumed"):
+            continue
+        if col == "dist_pc":
+            fid.append({"col": "dmod", "kind": "range",
+                        "value": (float(explorer.pc_to_dmod(val[0])),
+                                  float(explorer.pc_to_dmod(val[1]))),
+                        "enabled": True})
             continue
         kind = "min" if col.startswith("sep_") else (
             "range" if isinstance(val, tuple) else "max")
         fid.append({"col": col, "kind": kind, "value": val, "enabled": True})
-    fid_mask = explorer.apply_cuts(cat, fid)
-    want = explorer.metrics(cat, fid_mask, lit_is_observed=True)
+    fid_mask = explorer.apply_cuts(cat_a, fid)
+    want = explorer.metrics(cat_a, fid_mask, lit_is_observed=True)
 
     # seed a stubbed SIMBAD match store (5 fiducial stars) so every panel
     # must show the "In SIMBAD" overlay after the preset is applied
