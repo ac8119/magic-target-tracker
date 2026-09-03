@@ -126,6 +126,18 @@ Queue entries go to `data/queue.csv` when no Google Sheet is configured.
    public but everything is behind the login.
 
 ## Updating the observed database
+**Workstation-side additions (2026-09-02):** 43 Gemini-observed stars from
+Stringfellow's list (2 GS-2025B-Q-324, 37 GS-2026A-Q-133, and 5 GHOST
+GS-2026A-FT-201 re-observations, instrument "GHOST" under the GMOS
+category) were appended directly to `data/master_exclusion.csv`. The
+laptop's true source (`GMOS_observed/master_GMOS_observed.csv`) must absorb
+`data/GMOS_observed_additions_20260902.csv` (same object/ra/dec/program_id
+schema) BEFORE the next `build_exclusion_master.py` run, or these rows
+would be silently dropped by the rebuild. Note that script hardcodes
+instrument = "GMOS", so the 5 GHOST rows would need their instrument
+restored (category stays "GMOS" either way, which is what the observed
+cross-match keys on).
+
 After a new observing run or GMOS OT export:
 ```bash
 python3 target_tracker/build_exclusion_master.py
