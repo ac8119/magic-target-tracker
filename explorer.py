@@ -46,10 +46,11 @@ LOCAL_FALLBACK_GLOBS = [
 DEFAULT_CATALOG = "2025B_magic_noSMC_g195_ebv02_classified.fits"
 
 # local-volume-database copies searched in order (Pace's LVDB)
-LVDB_DIRS = [os.environ.get(
-                 "MAGIC_LVDB_DIR",
-                 "~/Documents/Research/magic-dwarf-outskirts/local_volume_database"),
-             os.path.join(APP_DIR, "data", "lvdb")]
+LVDB_DIRS = [d for d in (
+    os.environ.get("MAGIC_LVDB_DIR"),
+    "~/Documents/MIT_Work/Research/magic_scratch/dwarf_outskirts/pipeline/"
+    "local_volume_database",
+    os.path.join(APP_DIR, "data", "lvdb")) if d]
 LVDB_DWARF_FILES = ["dwarf_mw.csv"]
 LVDB_CLUSTER_FILES = ["gc_harris.csv", "gc_mw_new.csv", "gc_dwarf_hosted.csv"]
 LVDB_MAX_DIST_KPC = 300.0     # drop local-volume systems beyond the MW halo
@@ -65,13 +66,55 @@ LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
 HARD_BOUNDS = {"pmra": (-30, 30), "pmdec": (-30, 30), "ebv": (0, 1),
                "gi0": (-2, 5), "feh": (-5, 2), "e_feh": (0, 5),
                "dmod": (0, 25), "mag_g": (10, 25)}
+
+
+def dmod_to_pc(dmod):
+    """Distance modulus -> heliocentric distance in parsecs."""
+    return 10.0 ** (np.asarray(dmod, float) / 5.0 + 1.0)
+
+
+def pc_to_dmod(pc):
+    """Heliocentric distance in parsecs -> distance modulus. Guards pc <= 0,
+    which the slider's padded lower bound can reach."""
+    return 5.0 * np.log10(np.maximum(np.asarray(pc, float), 1e-6) / 10.0)
+
+
+# ── Cache pre-selection ─────────────────────────────────────────────────
+# Applied once in build_cache, BEFORE anything reaches the explorer, so the
+# UI cuts always operate on an already-cleaned sample. Each entry is
+# (column, human-readable rule, predicate) — the note under "Cuts" on the
+# target-selection page is rendered straight from this list, so editing a rule
+# here updates both the filtering and what the page claims it did.
+PRESELECT = [
+    ("source_id", "has a Gaia source_id (sentinel 999999 dropped)",
+     lambda d: d["source_id"] != GAIA_NO_MATCH),
+    ("extended_class_g", "extended_class_g in (0, 1) — drops galaxies and -9",
+     lambda d: np.isin(d["extended_class_g"], (0, 1))),
+    ("mag_psf_cahk", "valid CaHK photometry: 0 < mag_psf_cahk < 30",
+     # upper bound rejects the ~1e20 no-measurement sentinel and the >90
+     # placeholders; lower bound rejects unphysical negative magnitudes
+     lambda d: np.isfinite(d["mag_psf_cahk"])
+     & (d["mag_psf_cahk"] > CAHK_MIN) & (d["mag_psf_cahk"] < CAHK_MAX)),
+    ("ebv_sfd98", "E(B-V) <= 0.2 (SFD98)",
+     lambda d: np.isfinite(d["ebv_sfd98"]) & (d["ebv_sfd98"] <= EBV_MAX)),
+]
+GAIA_NO_MATCH = 999999   # source_id sentinel for "no Gaia cross-match"
+EBV_MAX = 0.2
+CAHK_MIN = 0.0
+CAHK_MAX = 30.0
+
+
+def preselect_note():
+    """The pre-selection as markdown bullets for the target-selection page."""
+    return "\n".join(f"- {rule}" for _, rule, _ in PRESELECT)
+
 
 # ── Fiducial preset ─────────────────────────────────────────────────────
 # One-click "standard MAGIC low-metallicity giant" selection, applied by the
@@ -87,7 +130,8 @@ HARD_BOUNDS = {"pmra": (-30, 30), "pmdec": (-30, 30), "ebv": (0, 1),
 #            limit has no counterpart since the depth cut is max-only;
 #   LMC/SMC excision radii per the *_noSMC selection variants.
 FIDUCIAL = {
-    "population": "RGB",
+    "population": "RGB",     # star_class checkbox: RGB only
+    "assumed": "RGB",        # and read the RGB-assumed feh/dmod columns
     "pmra": (-3.5, 3.5),      # mas/yr
     "pmdec": (-3.5, 3.5),     # mas/yr
     "feh": (-5.0, -3.0),      # dex
@@ -96,22 +140,29 @@ FIDUCIAL = {
                               # stars and regions significantly bluer than
                               # the main-sequence turnoff"
     "mag_g": 18.5,            # keep stars brighter than this
-    "dmod": (17.39, 25.0),    # dmod > 17.39 <=> d > 30 kpc (5*log10(30000/10));
-                              # the upper bound is the slider's hard limit,
-                              # i.e. effectively no far cut
+    "dist_pc": (30_000.0, 1_000_000.0),   # d > 30 kpc; the upper bound is
+                              # the old dmod=25 hard limit, i.e. no far cut
     "ebv": 0.05,              # stricter than the catalog's baked-in E(B-V)<0.2
     "sep_lmc": 5.0,           # excision radius around the LMC (deg)
     "sep_smc": 3.0,           # excision radius around the SMC (deg)
 }
 # every cut column a Clear-all must switch off
-CUT_COLS = ("pmra", "pmdec", "gi0", "feh", "dmod", "ebv", "e_feh", "mag_g",
-            "sep_lmc", "sep_smc")
+CUT_COLS = ("pmra", "pmdec", "gi0", "feh", "dist_pc", "ebv", "e_feh",
+            "mag_g", "sep_lmc", "sep_smc",
+            "broadband_valid", "gaia_var_flag")
 
 # every column a built cache / cloud subset carries
 SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
                   "mag_g", "gi0", "star_class", "l", "b", "sep_lmc", "sep_smc",
-                  "obs_cat", "lit_known"]
-RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g")
+                  "obs_cat", "lit_known",
+                  "feh_ext",
+                  "feh_rgb", "e_feh_rgb", "dmod_rgb", "feh_ext_rgb",
+                  "feh_ms", "e_feh_ms", "dmod_ms", "feh_ext_ms",
+                  "broadband_valid", "gaia_var_flag"]
+RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g",
+              "feh_rgb", "e_feh_rgb", "dmod_rgb",
+              "feh_ms", "e_feh_ms", "dmod_ms",
+              "broadband_valid", "gaia_var_flag")
 
 # canonical column -> catalog column candidates (first match wins)
 CANDS = {
@@ -120,7 +171,27 @@ CANDS = {
     "ebv": ["ebv_sfd98", "ebv"],
     "feh": ["feh"], "e_feh": ["e_feh"], "dmod": ["dmod"],
     "mag_g": ["mag_psf_g"],
+    # per-class values: the catalog solves each star under BOTH an RGB and an
+    # MS assumption, and `feh`/`e_feh`/`dmod` hold whichever matches
+    # star_class. Carrying both lets the UI re-assume a class (see
+    # ASSUMED_SUFFIX). Absent from pre-v5 caches and older release subsets.
+    "feh_rgb": ["fehs_rgb"], "e_feh_rgb": ["fehs_errs_rgb"],
+    "dmod_rgb": ["dmod_rgb"], "feh_ext_rgb": ["fehs_ext_rgb"],
+    "feh_ms": ["fehs_ms"], "e_feh_ms": ["fehs_errs_ms"],
+    "dmod_ms": ["dmod_ms"], "feh_ext_ms": ["fehs_ext_ms"],
+    # [Fe/H] extrapolation flag: also per-class (fehs_ext_rgb / fehs_ext_ms),
+    # so it swaps with the assumed class like feh/e_feh/dmod do
+    "feh_ext": ["feh_extrapolation_flag"],
+    # mpflags quality flags, carried as 1.0/0.0 (NaN where the catalog has
+    # no such column, which disables the corresponding UI cut)
+    "broadband_valid": ["broadband_valid"],
+    "gaia_var_flag": ["gaia_var_flag"],
 }
+
+# "Assumed [Fe/H], dmod values" -> column suffix ("" = as stored, i.e. the
+# values matching each star's own star_class)
+ASSUMED_SUFFIX = {"Matching star_class": "", "RGB": "_rgb", "MS": "_ms"}
+PER_CLASS_COLS = ("feh", "e_feh", "dmod", "feh_ext")
 # (g-i)_0: dereddened if available, else instrumental
 GI0_CANDS = [("g_dered", "i_dered"), ("mag_psf_g", "mag_psf_i")]
 
@@ -468,8 +539,11 @@ def occupied(star_ra, star_dec, m_ra, m_dec, bin_deg=OCC_BIN_DEG):
                        m_ra, m_dec, bin_deg)
 
 def load_lvdb():
-    """(dwarfs, clusters) DataFrames [name, ra, dec] from the first hit per
-    file, keeping only systems within LVDB_MAX_DIST_KPC (heliocentric)."""
+    """(dwarfs, clusters) DataFrames [name, ra, dec, rhalf] from the first hit
+    per file, keeping only systems within LVDB_MAX_DIST_KPC (heliocentric).
+    rhalf is LVDB's half-light radius along the MAJOR AXIS in ARCMIN, NaN
+    where the system has no structural fit — such rows still plot on the sky
+    overlay but are skipped by the r_h proximity flag."""
     def gather(fnames):
         frames = []
         for fn in fnames:
@@ -489,11 +563,113 @@ def load_lvdb():
                 frames.append(pd.DataFrame({
                     "name": t.get("name", t.get("key", "")),
                     "ra": pd.to_numeric(t["ra"], errors="coerce"),
-                    "dec": pd.to_numeric(t["dec"], errors="coerce")}).dropna())
+                    "dec": pd.to_numeric(t["dec"], errors="coerce"),
+                    "rhalf": pd.to_numeric(t.get("rhalf"), errors="coerce"),
+                    "ellipticity": pd.to_numeric(t.get("ellipticity"),
+                                                 errors="coerce"),
+                    }).dropna(subset=["name", "ra", "dec"]))
                 break
-        return (pd.concat(frames, ignore_index=True)
-                if frames else pd.DataFrame(columns=["name", "ra", "dec"]))
+        return (pd.concat(frames, ignore_index=True) if frames
+                else pd.DataFrame(columns=["name", "ra", "dec", "rhalf",
+                                           "ellipticity"]))
     return gather(LVDB_DWARF_FILES), gather(LVDB_CLUSTER_FILES)
+
+
+DEFAULT_N_RH = 10.0  # default aperture for the LVDB proximity flag, in r_half
+                     # (on-sky only: no distance term, by design)
+
+# Excluded from the r_h proximity flag (still drawn on the sky overlay): the
+# Clouds have their own dedicated sep_lmc/sep_smc excision cuts, and their
+# r_half is so large (LMC 193', SMC 59') that a 5 r_h aperture reaches 16 deg
+# for the LMC and swamps every compact dwarf in the flag.
+LVDB_FLAG_EXCLUDE = ("LMC", "SMC")
+
+
+def rhalf_circular(systems):
+    """Circularized (spherically averaged) half-light radius in arcmin:
+    r_h * sqrt(1 - ellipticity). LVDB's `rhalf` is the MAJOR-AXIS value, so
+    using it directly as a circular aperture over-covers flattened systems —
+    Sagittarius (e = 0.64) shrinks 342' -> 205'. This reproduces LVDB's own
+    rhalf_sph_physical exactly. Systems with no ellipticity are treated as
+    round (no change)."""
+    rh = pd.to_numeric(systems["rhalf"], errors="coerce")
+    e = pd.to_numeric(systems.get("ellipticity"), errors="coerce").fillna(0.0)
+    return rh * np.sqrt(np.clip(1.0 - e, 0.0, 1.0))
+
+
+def assumed_available(df, ranges=None):
+    """Which "Assumed [Fe/H], dmod values" options this frame supports.
+
+    A pre-v5 cache, an older release subset, or a catalog whose FITS simply
+    lacks the per-class columns cannot re-assume a class. Presence alone is
+    not enough: build_cache materializes a missing CANDS column as all-NaN,
+    so a range from the metadata sidecar (None when nothing is finite) is
+    what actually proves the values are there."""
+    out = ["Matching star_class"]
+    for label, sfx in ASSUMED_SUFFIX.items():
+        if not sfx:
+            continue
+        cols = [f"{c}{sfx}" for c in PER_CLASS_COLS]
+        if not all(c in df.columns for c in cols):
+            continue
+        if ranges is not None and not all(
+                ranges.get(f"{c}{sfx}") for c in ("feh", "dmod")):
+            continue
+        out.append(label)
+    return out
+
+
+def assume_class(df, assumed):
+    """View of df with feh/e_feh/dmod replaced by the values solved under the
+    `assumed` class. "Matching star_class" returns df untouched. Only the
+    three swapped columns are copied; the rest share storage with the cached
+    frame, which must never be mutated (it is st.cache_resource-shared)."""
+    sfx = ASSUMED_SUFFIX.get(assumed, "")
+    if not sfx:
+        return df
+    src = {c: f"{c}{sfx}" for c in PER_CLASS_COLS}
+    if not all(v in df.columns for v in src.values()):
+        return df
+    return df.assign(**{c: df[v] for c, v in src.items()})
+
+
+def lvdb_host(star_ra, star_dec, systems, n_rh=DEFAULT_N_RH,
+              exclude=LVDB_FLAG_EXCLUDE, circularize=True):
+    """Name of the LVDB system whose circular n_rh * r_half aperture contains
+    each star, "" where none does.
+
+    Matching runs on 3D unit vectors, so the RA wraparound and the cos(dec)
+    convergence near the poles are exact — several of these systems sit at
+    high |dec| where an RA/Dec box would be wrong. Systems are visited
+    largest-aperture-first so that where apertures overlap the most compact
+    (most specific) host wins. Systems with no catalogued rhalf, and any named
+    in `exclude` (the Clouds by default), are skipped. With circularize=True
+    the aperture uses the spherically averaged radius (see rhalf_circular);
+    pass False for the raw major-axis value.
+
+    The aperture is circular: LVDB also carries ellipticity/position_angle,
+    so for flattened systems this over-covers the minor axis and under-covers
+    the major one."""
+    from scipy.spatial import cKDTree
+    star_ra = np.asarray(star_ra, float)
+    host = np.full(len(star_ra), "", dtype=object)
+    if not len(star_ra) or not len(systems):
+        return host
+    tree = cKDTree(_unit_vectors(star_ra, star_dec))
+    ok = systems[~systems["name"].isin(list(exclude))].copy()
+    ok["_r"] = rhalf_circular(ok) if circularize else pd.to_numeric(
+        ok["rhalf"], errors="coerce")
+    ok = ok.dropna(subset=["_r"]).sort_values("_r", ascending=False)
+    for _, sy in ok.iterrows():
+        theta = np.radians(float(n_rh) * float(sy["_r"]) / 60.0)  # arcmin
+        if not theta > 0:
+            continue
+        # chord length subtending theta on the unit sphere
+        idx = tree.query_ball_point(_unit_vectors([sy["ra"]], [sy["dec"]])[0],
+                                    2.0 * np.sin(theta / 2.0))
+        if idx:
+            host[idx] = str(sy["name"])
+    return host
 
 
 # ──────────────────────── SIMBAD cross-match ────────────────────────
@@ -691,13 +867,20 @@ def _queue_fiducial(st, key, rng):
     values up when they are instantiated later in the same rerun)."""
     for col, val in FIDUCIAL.items():
         if col == "population":
-            st.session_state[key + ":pop"] = val
+            for cls in ("RGB", "MS", "ambiguous"):
+                st.session_state[f"{key}:cls:{cls}"] = (cls == val)
+        elif col == "assumed":
+            # reset to "Matching star_class" later if this catalog has no
+            # per-class columns (the radio validates against its own options)
+            st.session_state[key + ":assumed"] = val
         elif col in ("sep_lmc", "sep_smc") or rng.get(col):
             st.session_state[f"{key}:{col}:pending"] = val
 
 
 def _clear_cuts(st, key):
-    st.session_state[key + ":pop"] = "both"
+    for cls, on in (("RGB", True), ("MS", True), ("ambiguous", False)):
+        st.session_state[f"{key}:cls:{cls}"] = on
+    st.session_state[key + ":assumed"] = "Matching star_class"
     for col in CUT_COLS:
         st.session_state[f"{key}:{col}:on"] = False
         st.session_state.pop(f"{key}:{col}:pending", None)
@@ -797,6 +980,9 @@ def render():
         if r:
             h = HARD_BOUNDS.get(col, (-np.inf, np.inf))
             rng[col] = [max(r[0], h[0]), min(r[1], h[1])]
+    if rng.get("dmod"):   # distance is selected in pc, stored as a modulus
+        rng["dist_pc"] = [float(dmod_to_pc(rng["dmod"][0])),
+                          float(dmod_to_pc(rng["dmod"][1]))]
     key = os.path.basename(pq)  # widget namespace per catalog version
 
     ctrl, view = st.columns([1, 3], gap="medium")
@@ -805,6 +991,12 @@ def render():
     cuts = []
     with ctrl:
         st.subheader("Cuts")
+        with st.expander("Pre-selection already applied to this catalog"):
+            st.markdown(
+                "Applied when the cache was built, before any cut below:\n\n"
+                + preselect_note()
+                + "\n\nThe counts and sliders on this page all describe the "
+                  "post-pre-selection sample.")
         b1, b2 = st.columns(2)
         if b1.button("Fiducial cuts", use_container_width=True,
                      help="Standard MAGIC low-metallicity giant selection — "
@@ -813,13 +1005,44 @@ def render():
         if b2.button("Clear all", use_container_width=True):
             _clear_cuts(st, key)
 
-        pops = {"RGB": ["RGB"], "MS": ["MS"], "both": ["RGB", "MS"],
-                "include ambiguous": ["RGB", "MS", "ambiguous"]}
-        st.session_state.setdefault(key + ":pop", "both")
-        pop = st.radio("Population ([Fe/H], dmod are per-class values)",
-                       list(pops), horizontal=True, key=key + ":pop")
-        cuts.append({"col": "star_class", "kind": "isin", "value": pops[pop],
+        st.markdown("**Classification in catalog (star_class)**")
+        cb = st.columns(3)
+        keep_cls = []
+        for i, (label, val, default) in enumerate(
+                (("RGB", "RGB", True), ("MS", "MS", True),
+                 ("Ambiguous", "ambiguous", False))):
+            st.session_state.setdefault(f"{key}:cls:{val}", default)
+            if cb[i].checkbox(label, key=f"{key}:cls:{val}"):
+                keep_cls.append(val)
+        if not keep_cls:
+            st.warning("No star_class selected — nothing will pass the cuts.")
+        cuts.append({"col": "star_class", "kind": "isin", "value": keep_cls,
                      "enabled": True})
+
+        opts = assumed_available(df, meta.get("ranges"))
+        st.session_state.setdefault(key + ":assumed", opts[0])
+        if st.session_state[key + ":assumed"] not in opts:
+            st.session_state[key + ":assumed"] = opts[0]
+        assumed = st.radio(
+            "Assumed [Fe/H], dmod values", opts, horizontal=True,
+            key=key + ":assumed",
+            help="The catalog solves every star under both an RGB and an MS "
+                 "assumption. 'Matching star_class' uses the values for each "
+                 "star's own classification (feh / e_feh / dmod); RGB or MS "
+                 "forces that assumption for every star "
+                 "(fehs_rgb / dmod_rgb, fehs_ms / dmod_ms).")
+        if len(opts) == 1:
+            st.caption("This catalog cache predates the per-class columns — "
+                       "rebuild it to re-assume RGB / MS.")
+        df = assume_class(df, assumed)
+        sfx = ASSUMED_SUFFIX.get(assumed, "")
+        if sfx:   # re-range the sliders onto the assumed-class percentiles
+            for c in PER_CLASS_COLS:
+                if rng.get(f"{c}{sfx}"):
+                    rng[c] = rng[f"{c}{sfx}"]
+            if rng.get("dmod"):
+                rng["dist_pc"] = [float(dmod_to_pc(rng["dmod"][0])),
+                                  float(dmod_to_pc(rng["dmod"][1]))]
 
         def add(cut_on, col, kind, value):
             cuts.append({"col": col, "kind": kind, "value": value, "enabled": cut_on})
@@ -827,11 +1050,17 @@ def render():
         for col, label, fmt in (("pmra", "pmra (mas/yr)", "%.1f"),
                                 ("pmdec", "pmdec (mas/yr)", "%.1f"),
                                 ("gi0", "(g-i)₀ color", "%.2f"),
-                                ("feh", "[Fe/H]", "%.2f"),
-                                ("dmod", "distance modulus", "%.2f")):
+                                ("feh", "[Fe/H]", "%.2f")):
             if rng.get(col):
                 on, val = _range_cut(st, label, rng[col], f"{key}:{col}", fmt)
                 add(on, col, "range", val)
+        # selected in parsecs, cut on the stored `dmod` column so the fiducial
+        # marker line and every downstream dmod consumer keep working
+        if rng.get("dist_pc"):
+            on, val = _range_cut(st, "distance (pc)", rng["dist_pc"],
+                                 f"{key}:dist_pc", "%.0f")
+            add(on, "dmod", "range",
+                (float(pc_to_dmod(val[0])), float(pc_to_dmod(val[1]))))
         for col, label, fmt, lo in (("ebv", "E(B-V) max", "%.3f", 0.0),
                                     ("e_feh", "[Fe/H] error max", "%.2f", 0.0),
                                     ("mag_g", "depth: g max (mag_psf_g)",
@@ -841,6 +1070,25 @@ def render():
                 on, val = _thresh_cut(st, label, bounds, f"{key}:{col}", fmt)
                 add(on, col, "max", val)
 
+        st.subheader("Quality flags")
+        # only offered when the catalog actually carries the column (a missing
+        # CANDS column is materialized as all-NaN, and rng() is None for it)
+        any_flag = False
+        for col, label, keep, helptext in (
+                ("broadband_valid", "broadband_valid only", 1.0,
+                 "Keep only stars inside the g-r vs r-i color-color polygon."),
+                ("gaia_var_flag", "exclude Gaia variables", 0.0,
+                 "Drop stars matched to Gaia DR3 variables (I/358/varisum, 1\")."),
+        ):
+            if not rng.get(col):
+                continue
+            any_flag = True
+            on = st.checkbox(label, key=f"{key}:{col}:on", help=helptext)
+            # equality on a 1.0/0.0 column; NaN never passes an enabled cut
+            add(on, col, "range", (keep, keep))
+        if not any_flag:
+            st.caption("This catalog carries no mpflags quality columns.")
+
         st.subheader("Excise Clouds")
         for name, (cra, cdec, rdef), col in (("LMC", LMC, "sep_lmc"),
                                              ("SMC", SMC, "sep_smc")):
@@ -848,7 +1096,39 @@ def render():
                                 (0.5, 15.0), f"{key}:{col}", "%.1f", default=rdef)
             add(on, col, "min", r)
 
+        st.subheader("LVDB proximity")
+        near_on = st.checkbox("flag stars near an LVDB dwarf / star cluster",
+                              key=key + ":nearlvdb")
+        n_rh = st.number_input("aperture (× r_half)", 0.5, 50.0, DEFAULT_N_RH,
+                               0.5, key=key + ":nrh", disabled=not near_on,
+                               help="Circular aperture around each LVDB system, "
+                                    "in half-light radii. Adds an lvdb_host "
+                                    "column to the target table.")
+        drop_near = st.checkbox("exclude flagged stars from the selection",
+                                key=key + ":droplvdb", disabled=not near_on)
+
     mask = apply_cuts(df, cuts)
+
+    # LVDB proximity flag — evaluated on the filtered rows only, so the cost
+    # tracks the selection rather than the full catalog
+    lvdb_flag = np.full(len(df), "", dtype=object)
+    if near_on:
+        dwarfs_rh, clusters_rh = load_lvdb()
+        systems = pd.concat([dwarfs_rh, clusters_rh], ignore_index=True)
+        sel = np.flatnonzero(mask)
+        lvdb_flag[sel] = lvdb_host(df["ra"].to_numpy()[sel],
+                                   df["dec"].to_numpy()[sel],
+                                   systems, n_rh=float(n_rh))
+        n_near = int((lvdb_flag != "").sum())
+        n_skip = int(systems["rhalf"].isna().sum())
+        st.caption(f"{n_near:,} of {int(mask.sum()):,} filtered stars fall "
+                   f"within {float(n_rh):g} r_half of an LVDB system "
+                   f"({', '.join(LVDB_FLAG_EXCLUDE)} excised — use the "
+                   "Excise Clouds cuts for those)"
+                   + (f"; {n_skip} of {len(systems)} systems skipped for "
+                      "having no catalogued r_half" if n_skip else ""))
+        if drop_near:
+            mask = mask & (lvdb_flag == "")
 
     skey = key + ":simbad"
     if skey not in st.session_state:
@@ -908,7 +1188,7 @@ def render():
 
         import inspect
         ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
-              "cuts": cuts,
+              "cuts": cuts, "lvdb_flag": lvdb_flag,
               # click-to-highlight: selected df row positions live under
               # sel_key; the e_feh panel writes it (plotly selection events,
               # Streamlit >= 1.35 only), the table panel consumes it
@@ -1205,6 +1485,9 @@ def panel_table(df, mask, ui):
                         "obs_cat", "lit_known") if c in df.columns]
     tab = df.loc[mask, cols].copy()
     tab["in_simbad"] = np.asarray(ui["sim_mask"])[tab.index]  # sortable
+    flag = ui.get("lvdb_flag")
+    if flag is not None and (np.asarray(flag) != "").any():
+        tab["lvdb_host"] = np.asarray(flag, dtype=object)[tab.index]
     # empty until a SIMBAD query has run (sep stays numeric for Arrow/sorting)
     tab["simbad_main_id"] = ""
     tab["simbad_main_type"] = ""
