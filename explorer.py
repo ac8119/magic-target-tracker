@@ -58,7 +58,7 @@ LVDB_MAX_DIST_KPC = 300.0     # drop local-volume systems beyond the MW halo
 MATCH_RADIUS_ARCSEC = 1.0        # ledger cross-match — the 1" MAGIC pipeline
                                  # convention (make_targets.py, SIMBAD query);
                                  # the app's interactive checker stays at 2"
-OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "GMOS")
+OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "Gemini")
 SIMBAD_RADIUS_ARCSEC = 1.0       # CDS X-Match radius (make_targets.py convention)
 SIMBAD_MAX_ROWS = 50_000         # refuse to upload more rows than this to CDS
 SIMBAD_CACHE_CSV = os.path.join(APP_DIR, "data", "simbad_cache.csv")
@@ -129,9 +129,43 @@ def apply_preselect(d, names, n_rows, counts=None):
     return keep
 
 
+# UI wording for the pre-selection note: plain meaning only. The exact
+# predicates (sentinel encodings, bounds) live in the PRESELECT lambdas and
+# the technical rule strings above, which the build log and cache meta keep.
+PRESELECT_PLAIN = {
+    "source_id": "has a Gaia DR3 counterpart",
+    "extended_class_g": "point-like sources only (galaxies removed)",
+    "mag_psf_cahk": "has a valid CaHK measurement",
+    "ebv_sfd98": "low reddening: E(B-V) ≤ 0.2 (SFD98)",
+}
+
+# human wording for known cloud-subset row cuts; anything else renders as the
+# raw expression, and a subset with no embedded cut info shows nothing
+SUBSET_CUT_PLAIN = {
+    "(feh_rgb < -2) | (feh_ms < -2)":
+        "metal-poor pre-cut: [Fe/H] < −2.0 under either the RGB or MS "
+        "assumption (fehs_rgb < −2 | fehs_ms < −2)",
+    "feh == feh and star_class in ['RGB', 'MS']":
+        "metal-poor pre-cut: valid adopted [Fe/H] and star_class RGB or MS",
+}
+
+
 def preselect_note():
     """The pre-selection as markdown bullets for the target-selection page."""
-    return "\n".join(f"- {rule}" for _, rule, _ in PRESELECT)
+    return "\n".join(f"- {PRESELECT_PLAIN.get(col, rule)}"
+                      for col, rule, _ in PRESELECT)
+
+
+def subset_cut_from_parquet(pq_path):
+    """The row-cut expression a cloud subset was built with, embedded in the
+    Parquet schema metadata by build_cloud_subset.py; None when absent."""
+    try:
+        import pyarrow.parquet as papq
+        md = papq.read_schema(pq_path).metadata or {}
+        cut = md.get(b"magic_subset_cut")
+        return cut.decode() if cut else None
+    except Exception:
+        return None
 
 
 # ── Fiducial preset ─────────────────────────────────────────────────────
@@ -168,6 +202,10 @@ FIDUCIAL = {
     "dist_pc": (30_000.0, 1_000_000.0),   # d > 30 kpc; the upper bound is
                               # the old dmod=25 hard limit, i.e. no far cut
     "ebv": 0.05,              # stricter than the catalog's baked-in E(B-V)<0.2
+    # overview-paper quality cuts: broadband color-color validity required,
+    # Gaia-flagged variables excluded (unsuitable for photometric [Fe/H])
+    "broadband_valid": True,  # tick the 'broadband_valid only' quality flag
+    "gaia_var_flag": True,    # tick the 'exclude Gaia variables' flag
     "sep_lmc": 5.0,           # excision radius around the LMC (deg)
     "sep_smc": 3.0,           # excision radius around the SMC (deg)
 }
@@ -958,6 +996,9 @@ def _queue_fiducial(st, key, rng):
             # reset to "Matching star_class" later if this catalog has no
             # per-class columns (the radio validates against its own options)
             st.session_state[key + ":assumed"] = val
+        elif col in ("broadband_valid", "gaia_var_flag"):
+            # quality-flag checkboxes: True just switches the cut on
+            st.session_state[f"{key}:{col}:on"] = bool(val)
         elif col in ("sep_lmc", "sep_smc") or rng.get(col):
             st.session_state[f"{key}:{col}:pending"] = val
 
@@ -1043,8 +1084,12 @@ def render():
                            f"(missing columns: {sorted(need - set(dfr.columns))}) "
                            "— rebuild it with build_cloud_subset.py.")
                 return
+            meta_rel = _make_meta(dfr, f"{ref}@{rel['tag']}")
+            cut = subset_cut_from_parquet(pq)
+            if cut:
+                meta_rel["subset_cut"] = cut
             with open(js, "w") as f:
-                json.dump(_make_meta(dfr, f"{ref}@{rel['tag']}"), f, indent=1)
+                json.dump(meta_rel, f, indent=1)
     else:
         cat_path = ref
         pq, js = cache_paths(cat_path)
@@ -1077,11 +1122,14 @@ def render():
     with ctrl:
         st.subheader("Cuts")
         with st.expander("Pre-selection already applied to this catalog"):
-            st.markdown(
-                "Applied when the cache was built, before any cut below:\n\n"
-                + preselect_note()
-                + "\n\nThe counts and sliders on this page all describe the "
-                  "post-pre-selection sample.")
+            note = ("Applied when the cache was built, before any cut "
+                    "below:\n\n" + preselect_note())
+            cut = meta.get("subset_cut")
+            if cut:
+                note += "\n- " + SUBSET_CUT_PLAIN.get(cut, f"row pre-cut: `{cut}`")
+            st.markdown(note
+                        + "\n\nThe counts and sliders on this page all "
+                          "describe the post-pre-selection sample.")
         b1, b2 = st.columns(2)
         if b1.button("Fiducial cuts", use_container_width=True,
                      help="Standard MAGIC low-metallicity giant selection — "
@@ -1354,8 +1402,9 @@ def _density_or_scatter(fig_go, x, y, name, nbins=(360, 200)):
             x=0.5 * (xe[:-1] + xe[1:]), y=0.5 * (ye[:-1] + ye[1:]),
             z=np.where(H.T > 0, np.log10(H.T, where=H.T > 0), np.nan),
             colorscale="Viridis", colorbar=dict(title="log₁₀ N"), name=name)
+    # same marker spec as the e_feh panel's targets, so both read alike
     return fig_go.Scattergl(x=x, y=y, mode="markers", name=name,
-                            marker=dict(size=2, color="#4c78a8", opacity=0.5))
+                            marker=dict(size=5, color="#3a5f8a", opacity=0.75))
 
 
 def panel_sky(df, mask, ui):
@@ -1390,15 +1439,15 @@ def panel_sky(df, mask, ui):
                 name="Near LVDB system" + (" (sampled)" if sampled else ""),
                 customdata=df["lvdb_host"].astype(str).to_numpy()[pos],
                 hovertemplate="%{customdata}<extra>Near LVDB system</extra>",
-                marker=dict(symbol="circle-open", size=10,
+                marker=dict(symbol="circle-open", size=12,
                             color=LVDB_NEAR_COLOR, line=dict(width=1))))
     for sel, name, marker in (
             (obs_us, "observed by us",
-             dict(symbol="x", size=7, color="#e45756")),
+             dict(symbol="x", size=9, color="#e45756")),
             (lit, "literature-known",
-             dict(symbol="circle-open", size=7, color="#f58518")),
+             dict(symbol="circle-open", size=9, color="#f58518")),
             (ui["sim_mask"], "In SIMBAD",
-             dict(symbol="diamond-open", size=8, color=SIMBAD_COLOR))):
+             dict(symbol="diamond-open", size=10, color=SIMBAD_COLOR))):
         if sel.any():
             fig.add_trace(go.Scattergl(
                 x=df[xc].to_numpy()[sel], y=df[yc].to_numpy()[sel],

@@ -48,7 +48,7 @@ syn = pd.DataFrame({
     "mag_g":    [17.0, 18.0, 16.0, 18.4, 19.5, 17.5],
     "star_class": pd.Categorical(["RGB", "MS", "ambiguous", "RGB", "MS", "RGB"]),
     "sep_lmc":  [10.0, 2.0, 8.0, 20.0, 1.0, 30.0],
-    "obs_cat":  ["MAGIC_Magellan", "", "", "GMOS", "", ""],
+    "obs_cat":  ["MAGIC_Magellan", "", "", "Gemini", "", ""],
     "lit_known": [True, False, False, False, False, True],
 })
 cuts = [
@@ -89,13 +89,16 @@ assert not explorer.occupied(np.array([]), np.array([]), m_ra, m_dec).any()
 # classify_against_ledger on a synthetic ledger: an observation within 2"
 # sets its category and beats a literature entry at the same position
 ledger = pd.DataFrame({
-    "ra":       [10.0, 10.0, 20.0],
-    "dec":      [-1.0, -1.0, -2.0],
-    "category": ["MAGIC_Magellan", "Literature", "Literature"]})
+    "ra":       [10.0, 10.0, 20.0, 30.0],
+    "dec":      [-1.0, -1.0, -2.0, -3.0],
+    "category": ["MAGIC_Magellan", "Literature", "Literature", "Gemini"]})
 oc, lk = explorer.classify_against_ledger(
     np.array([10.0, 20.0, 30.0]), np.array([-1.0, -2.0, -3.0]), ledger)
-assert oc.tolist() == ["MAGIC_Magellan", "", ""], oc.tolist()
+# Gemini (GMOS or GHOST rows alike) counts as observed-by-us
+assert oc.tolist() == ["MAGIC_Magellan", "", "Gemini"], oc.tolist()
 assert lk.tolist() == [True, True, False], lk.tolist()
+assert "Gemini" in explorer.OBSERVED_CATEGORIES
+assert "GMOS" not in explorer.OBSERVED_CATEGORIES
 
 # SIMBAD path with a stubbed X-Match (no network) + persistent-cache roundtrip
 def fake_xmatch(ra, dec, radius_arcsec=1.0):
@@ -127,7 +130,7 @@ detail = explorer.star_detail(syn2, 5, sim)
 assert "[Fe/H] = -2.80" in detail and "literature-known" in detail, detail
 assert "SIMBAD" not in detail
 detail3 = explorer.star_detail(syn2, 3, sim)   # sim has row 3 (HD 1)
-assert "SIMBAD: HD 1" in detail3 and "GMOS" in detail3, detail3
+assert "SIMBAD: HD 1" in detail3 and "Gemini" in detail3, detail3
 # per-user catalog globs + allowlisted runtime paths
 fake_secrets = {"catalogs": {
     "globs": ["/data/magic/*.fits"],
@@ -192,6 +195,25 @@ for mode, expect in (("Near dwarf", [1, 0, 0, 0]),
     assert got.tolist() == [bool(x) for x in expect], (mode, got.tolist())
 print("OK  LVDB typed host flag + proximity cut modes")
 
+# build_exclusion_master additions ingestion: 1" same-category+program dedup
+import tempfile as _tf2
+from build_exclusion_master import merge_additions
+_addir = _tf2.mkdtemp()
+with open(os.path.join(_addir, "ledger_additions_test.csv"), "w") as f:
+    f.write("name,ra,dec,category,detail,instrument\n"
+            "dup_star,50.0,-30.0,Gemini,GS-1,GMOS\n"       # same cat+prog at 0"
+            "multi_star,60.0,-40.0,Gemini,GS-1,GMOS\n"     # Magellan there: keep
+            "fresh_star,70.0,-50.0,Gemini,GS-2,GHOST\n")
+rows = [["dup_star", 50.0, -30.0, "Gemini", "GS-1", "GMOS"],
+        ["mag_star", 60.0, -40.0, "MAGIC_Magellan", "240101_MagE", "MagE"]]
+n = merge_additions(rows, _addir)
+assert n == 2 and len(rows) == 4, (n, len(rows))
+names = [r[0] for r in rows]
+assert "multi_star" in names and "fresh_star" in names
+assert names.count("dup_star") == 1, "same-category+program duplicate re-added"
+assert rows[-1][5] == "GHOST" and rows[-1][3] == "Gemini"
+print("OK  ledger additions ingestion + same-category dedup")
+
 # cloud subset maker: cut + schema columns + roundtrip through the loader
 import tempfile as _tf
 from build_cloud_subset import make_subset
@@ -199,9 +221,21 @@ big = syn.assign(mag_g=17.0, dmod=16.5, junk_col=1.0)
 sub = make_subset(big, "feh == feh and star_class in ['RGB', 'MS']")
 assert len(sub) == 5, len(sub)   # row 2 (NaN feh AND ambiguous) dropped
 assert "junk_col" not in sub.columns and "obs_cat" in sub.columns
+from build_cloud_subset import write_subset
 pq_tmp = os.path.join(_tf.mkdtemp(), "sub.parquet")
-sub.to_parquet(pq_tmp, compression="zstd", index=False)
+write_subset(sub, pq_tmp, "feh == feh and star_class in ['RGB', 'MS']")
 back = pd.read_parquet(pq_tmp)
+# the row cut travels inside the parquet; absent -> None, never a guess
+assert explorer.subset_cut_from_parquet(pq_tmp) == \
+    "feh == feh and star_class in ['RGB', 'MS']"
+bare = os.path.join(_tf.mkdtemp(), "bare.parquet")
+sub.to_parquet(bare, index=False)
+assert explorer.subset_cut_from_parquet(bare) is None
+# and the UI note renders plain language, no sentinel talk
+note = explorer.preselect_note()
+assert "Gaia DR3 counterpart" in note and "point-like" in note, note
+for jargon in ("999999", "sentinel", "masked", "1e20"):
+    assert jargon not in note, (jargon, note)
 meta_rt = explorer._make_meta(back, "sub@test")
 assert meta_rt["n_rows"] == 5 and meta_rt["ranges"]["feh"] is not None
 assert explorer.apply_cuts(
@@ -279,6 +313,8 @@ uniq = df[~df["in_earlier_run"]]
 assert page_metrics["Unique targets proposed"] == f"{len(uniq):,}"
 assert page_metrics["Observed"] == f"{(uniq['status'] == 'observed').sum():,}"
 assert len(at.dataframe) >= 2, "per-run summary / target tables not rendered"
+side = " ".join(str(c.value) for c in at.sidebar.caption)
+assert "Gemini: 98" in side and "GMOS 93" in side and "GHOST 5" in side, side
 print(f"OK  app 'Follow-up progress' page renders: {page_metrics}")
 
 # ── 4. the explorer page renders on the cached real catalog (if present) ──
@@ -336,6 +372,14 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
                                   float(explorer.pc_to_dmod(val[1]))),
                         "enabled": True})
             continue
+        if col == "broadband_valid":     # quality flags: require-valid /
+            fid.append({"col": col, "kind": "range", "value": (1.0, 1.0),
+                        "enabled": bool(val)})
+            continue
+        if col == "gaia_var_flag":       # ... exclude-variable
+            fid.append({"col": col, "kind": "range", "value": (0.0, 0.0),
+                        "enabled": bool(val)})
+            continue
         kind = "min" if col.startswith("sep_") else (
             "range" if isinstance(val, tuple) else "max")
         fid.append({"col": col, "kind": kind, "value": val, "enabled": True})
@@ -368,6 +412,11 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
         assert ck2[k] == expect, (cls, ck2[k])
     a2 = [r for r in at2.radio if "Assumed" in (r.label or "")][0]
     assert a2.value == "RGB", a2.value
+    # fiducial also switches both quality flags on
+    ck2 = {c.key: c.value for c in at2.checkbox}
+    for col in ("broadband_valid", "gaia_var_flag"):
+        k = next(k for k in ck2 if k.endswith(f":{col}:on"))
+        assert ck2[k] is True, (col, ck2[k])
     # Assumed = RGB means no ambiguous-cut warning despite the feh cut
     assert not any("ambiguous" in (w.value or "").lower() for w in at2.warning)
     em2 = {m.label: m.value for m in at2.metric}

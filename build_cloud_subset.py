@@ -34,6 +34,18 @@ def make_subset(df, cut=DEFAULT_CUT):
     return sub[cols].reset_index(drop=True)
 
 
+def write_subset(sub, out, cut):
+    """Write the subset as zstd Parquet with the row-cut expression embedded
+    in the schema metadata, so the explorer can display what pre-cut a
+    downloaded release asset was built with."""
+    import pyarrow as pa
+    import pyarrow.parquet as papq
+    tb = pa.Table.from_pandas(sub, preserve_index=False)
+    tb = tb.replace_schema_metadata({**(tb.schema.metadata or {}),
+                                     b"magic_subset_cut": (cut or "").encode()})
+    papq.write_table(tb, out, compression="zstd")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -60,7 +72,7 @@ def main():
     sub = make_subset(df, a.cut)
     out = a.out or (os.path.splitext(os.path.basename(path))[0]
                     + "_cloud_subset.parquet")
-    sub.to_parquet(out, compression="zstd", index=False)
+    write_subset(sub, out, a.cut)
 
     mem = int(sub.memory_usage(deep=True).sum())
     print(f"cut:   {a.cut}")
