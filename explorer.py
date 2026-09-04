@@ -212,7 +212,7 @@ FIDUCIAL = {
 # every cut column a Clear-all must switch off
 CUT_COLS = ("pmra", "pmdec", "gi0", "feh", "dist_pc", "ebv", "e_feh",
             "mag_g", "sep_lmc", "sep_smc",
-            "broadband_valid", "gaia_var_flag", "lvdbcut")
+            "broadband_valid", "gaia_var_flag", "lvdbcut", "feh_ext")
 
 # every column a built cache / cloud subset carries
 SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
@@ -1218,7 +1218,8 @@ def render():
         # (all NaN), so a per-class cut under 'Matching star_class' silently
         # drops every one of them
         if (assumed == "Matching star_class" and "ambiguous" in keep_cls
-                and any(c["enabled"] and c["col"] in ("feh", "e_feh", "dmod")
+                and any(c["enabled"]
+                        and c["col"] in ("feh", "e_feh", "dmod", "feh_ext")
                         for c in cuts)):
             st.warning(
                 "Ambiguous stars have no adopted [Fe/H]/dmod, so with "
@@ -1242,6 +1243,22 @@ def render():
             on = st.checkbox(label, key=f"{key}:{col}:on", help=helptext)
             # equality on a 1.0/0.0 column; NaN never passes an enabled cut
             add(on, col, "range", (keep, keep))
+        # mode-aware extrapolation cut: feh_ext is post-assume_class, so it
+        # already IS the adopted / RGB-assumed / MS-assumed flag. NaN fails
+        # the enabled cut — deliberate and faithful: in the catalogs feh_ext
+        # is NaN exactly where the mode's [Fe/H] is NaN (verified on v260810:
+        # zero NaN-ext rows with a finite mode [Fe/H]), so no star with a
+        # usable [Fe/H] is ever dropped by this box.
+        if "feh_ext" in df.columns and bool(
+                np.isfinite(df["feh_ext"].to_numpy()).any()):
+            any_flag = True
+            on = st.checkbox(
+                "Exclude feh extrapolation flag", key=f"{key}:feh_ext:on",
+                help="Keep only stars whose [Fe/H] in the active assumption "
+                     "mode is not an extrapolation (flag == 0). Follows the "
+                     "'Assumed' selector; stars with no [Fe/H] in that mode "
+                     "fail while enabled.")
+            add(on, "feh_ext", "range", (0.0, 0.0))
         if not any_flag:
             st.caption("This catalog carries no mpflags quality columns.")
 

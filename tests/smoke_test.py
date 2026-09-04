@@ -204,6 +204,28 @@ for mode, expect in (("Near dwarf", [1, 0, 0, 0]),
     assert got.tolist() == [bool(x) for x in expect], (mode, got.tolist())
 print("OK  LVDB typed host flag + proximity cut modes")
 
+# mode-aware extrapolation cut: post-assume feh_ext == 0, NaN fails
+ext = pd.DataFrame({
+    "feh":         [-3.0, -2.0, np.nan],
+    "e_feh":       [0.2, 0.2, np.nan],
+    "dmod":        [17.0, 17.0, np.nan],
+    "feh_ext":     [0.0, 1.0, np.nan],
+    "feh_rgb":     [-3.1, -2.2, -2.9],
+    "e_feh_rgb":   [0.2, 0.2, 0.3],
+    "dmod_rgb":    [17.1, 17.2, 17.3],
+    "feh_ext_rgb": [1.0, 0.0, 0.0],
+    "feh_ms":      [np.nan] * 3, "e_feh_ms": [np.nan] * 3,
+    "dmod_ms":     [np.nan] * 3, "feh_ext_ms": [np.nan] * 3,
+})
+ext_cut = [{"col": "feh_ext", "kind": "range", "value": (0.0, 0.0),
+            "enabled": True}]
+assert explorer.apply_cuts(ext, ext_cut).tolist() == [True, False, False]
+assert explorer.apply_cuts(
+    explorer.assume_class(ext, "RGB"), ext_cut).tolist() == [False, True, True]
+assert explorer.apply_cuts(
+    explorer.assume_class(ext, "MS"), ext_cut).tolist() == [False] * 3
+print("OK  mode-aware feh extrapolation cut (NaN fails)")
+
 # build_exclusion_master additions ingestion: 1" same-category+program dedup
 import tempfile as _tf2
 from build_exclusion_master import merge_additions
