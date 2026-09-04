@@ -148,8 +148,15 @@ def preselect_note():
 #            limit has no counterpart since the depth cut is max-only;
 #   LMC/SMC excision radii per the *_noSMC selection variants.
 FIDUCIAL = {
-    "population": "RGB",     # star_class checkbox: RGB only
-    "assumed": "RGB",        # and read the RGB-assumed feh/dmod columns
+    # Targeting context: distant low-metallicity halo giant follow-up.
+    # Ambiguous stars are INCLUDED and evaluated under the RGB assumption —
+    # the [Fe/H]_RGB targeting logic behind PicII-503 — because the distant
+    # metal-poor giants this program exists for often classify as ambiguous.
+    # MS is excluded: a measured parallax says dwarf, not distant giant.
+    # This is preset-only context: the explorer's DEFAULT stays
+    # 'Matching star_class'; only the [Fiducial cuts] button sets Assumed=RGB.
+    "population": ("RGB", "ambiguous"),   # star_class checkboxes
+    "assumed": "RGB",        # cut on the RGB-assumed feh/e_feh/dmod columns
     "pmra": (-3.5, 3.5),      # mas/yr
     "pmdec": (-3.5, 3.5),     # mas/yr
     "feh": (-5.0, -3.0),      # dex
@@ -913,8 +920,9 @@ def _queue_fiducial(st, key, rng):
     values up when they are instantiated later in the same rerun)."""
     for col, val in FIDUCIAL.items():
         if col == "population":
+            vals = (val,) if isinstance(val, str) else tuple(val)
             for cls in ("RGB", "MS", "ambiguous"):
-                st.session_state[f"{key}:cls:{cls}"] = (cls == val)
+                st.session_state[f"{key}:cls:{cls}"] = cls in vals
         elif col == "assumed":
             # reset to "Matching star_class" later if this catalog has no
             # per-class columns (the radio validates against its own options)
@@ -1117,6 +1125,18 @@ def render():
                 bounds = (rng[col][0] if lo is None else lo, rng[col][1])
                 on, val = _thresh_cut(st, label, bounds, f"{key}:{col}", fmt)
                 add(on, col, "max", val)
+
+        # footgun guard: ambiguous stars have no ADOPTED feh/e_feh/dmod
+        # (all NaN), so a per-class cut under 'Matching star_class' silently
+        # drops every one of them
+        if (assumed == "Matching star_class" and "ambiguous" in keep_cls
+                and any(c["enabled"] and c["col"] in ("feh", "e_feh", "dmod")
+                        for c in cuts)):
+            st.warning(
+                "Ambiguous stars have no adopted [Fe/H]/dmod, so with "
+                "Assumed = 'Matching star_class' they will ALL fail the "
+                "enabled [Fe/H] / error / distance cut. Switch 'Assumed' to "
+                "RGB or MS to cut them by their branch values instead.")
 
         st.subheader("Quality flags")
         # only offered when the catalog actually carries the column (a missing

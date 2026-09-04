@@ -302,7 +302,7 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     # the swapped columns, and turn the pc range into a dmod range
     cat_a = explorer.assume_class(cat, explorer.FIDUCIAL["assumed"])
     fid = [{"col": "star_class", "kind": "isin",
-            "value": [explorer.FIDUCIAL["population"]], "enabled": True}]
+            "value": list(explorer.FIDUCIAL["population"]), "enabled": True}]
     for col, val in explorer.FIDUCIAL.items():
         if col in ("population", "assumed"):
             continue
@@ -330,9 +330,22 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     # seed a click-selection: the third stubbed SIMBAD star
     at2.session_state[f"{ekey}:sel_rows"] = [int(seed_pos[2])]
 
+    # default mode is 'Matching star_class' and no ambiguous-cut warning
+    assert assumed[0].value == "Matching star_class", assumed[0].value
+    assert not any("ambiguous" in (w.value or "").lower() for w in at2.warning)
+
     fbtn = next(b for b in at2.button if b.label == "Fiducial cuts")
     fbtn.click().run()
     assert not at2.exception, at2.exception
+    # corrected fiducial: classes {RGB, ambiguous}, MS off, Assumed = RGB
+    ck2 = {c.key: c.value for c in at2.checkbox}
+    for cls, expect in (("RGB", True), ("ambiguous", True), ("MS", False)):
+        k = next(k for k in ck2 if k.endswith(f":cls:{cls}"))
+        assert ck2[k] == expect, (cls, ck2[k])
+    a2 = [r for r in at2.radio if "Assumed" in (r.label or "")][0]
+    assert a2.value == "RGB", a2.value
+    # Assumed = RGB means no ambiguous-cut warning despite the feh cut
+    assert not any("ambiguous" in (w.value or "").lower() for w in at2.warning)
     em2 = {m.label: m.value for m in at2.metric}
     assert em2["In SIMBAD"] == "5", em2
     assert em2["Passing cuts"] == f"{want['selected']:,}", (em2, want)
@@ -363,6 +376,16 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     details = " ".join(str(m.value) for m in at2.markdown)
     assert "SIMBAD: FAKE 2" in details, "detail line missing"
     print("OK  click-selection state puts the star first with a detail line")
+
+    # footgun guard: Matching star_class + ambiguous checked + feh cut on
+    # -> warning appears (and it names the fix)
+    a2.set_value("Matching star_class").run()
+    warns = [w.value for w in at2.warning if "ambiguous" in (w.value or "").lower()]
+    assert warns and "Assumed" in warns[0], at2.warning
+    a2 = [r for r in at2.radio if "Assumed" in (r.label or "")][0]
+    a2.set_value("RGB").run()   # restore the fiducial state
+    assert not any("ambiguous" in (w.value or "").lower() for w in at2.warning)
+    print("OK  ambiguous-cut footgun warning in the trap state only")
 
     # feature flag is default-closed: without it neither workstation page
     # is offered, with it both are (data exists on this machine)
