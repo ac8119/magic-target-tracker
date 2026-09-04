@@ -182,7 +182,7 @@ def page_check(excl, queue):
     st.markdown(
         "Paste coordinates below **or** upload a CSV. Each target is cross-matched "
         "against **{:,} observed positions** (MAGIC Magellan runs, non-MAGIC Magellan, "
-        "GMOS programs, and the literature: SAGA / Roederer+24 / JINAbase) plus the "
+        "Gemini GMOS/GHOST programs, and the literature: SAGA / Roederer+24 / JINAbase) plus the "
         "current queue.".format(len(excl)))
     radius = st.number_input("Match radius (arcsec)", 0.5, 30.0, DEFAULT_RADIUS_ARCSEC, 0.5)
 
@@ -343,7 +343,7 @@ def page_browse(excl):
     st.header("Browse the observed-star database")
     c1, c2 = st.columns(2)
     cats = c1.multiselect("Category", sorted(excl["category"].unique()),
-                          default=["MAGIC_Magellan", "nonMAGIC_Magellan", "GMOS"])
+                          default=["MAGIC_Magellan", "nonMAGIC_Magellan", "Gemini"])
     search = c2.text_input("Name contains")
     view = excl[excl["category"].isin(cats)] if cats else excl
     if search:
@@ -378,16 +378,19 @@ if check_login():
         pages.append("Follow-up progress")
     page = st.sidebar.radio("Page", pages)
     st.sidebar.markdown("---")
+    gem = excl[excl["category"] == "Gemini"]
     st.sidebar.caption(
         "Observed database: {:,} positions\n\n"
         "MAGIC Magellan: {}\n\n"
         "non-MAGIC Magellan: {}\n\n"
-        "GMOS: {}\n\n"
+        "Gemini: {} ({})\n\n"
         "Literature: {:,}".format(
             len(excl),
             (excl["category"] == "MAGIC_Magellan").sum(),
             (excl["category"] == "nonMAGIC_Magellan").sum(),
-            (excl["category"] == "GMOS").sum(),
+            len(gem),
+            " · ".join(f"{k} {v}" for k, v in
+                       gem["instrument"].value_counts().items()) or "none",
             (excl["category"] == "Literature").sum()))
     if page == "Check targets":
         page_check(excl, queue)

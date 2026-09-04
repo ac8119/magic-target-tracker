@@ -46,7 +46,7 @@ OUT = os.path.join(APP_DIR, "data", "target_runs.csv")
 
 MATCH_RADIUS = 1.0 * u.arcsec  # MAGIC convention (see make_targets.py)
 
-OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "GMOS")
+OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "Gemini")
 NAME_COLS = ("name", "Name", "ID", "id", "objid", "objid_1")
 
 

@@ -126,17 +126,20 @@ Queue entries go to `data/queue.csv` when no Google Sheet is configured.
    public but everything is behind the login.
 
 ## Updating the observed database
-**Workstation-side additions (2026-09-02):** 43 Gemini-observed stars from
-Stringfellow's list (2 GS-2025B-Q-324, 37 GS-2026A-Q-133, and 5 GHOST
-GS-2026A-FT-201 re-observations, instrument "GHOST" under the GMOS
-category) were appended directly to `data/master_exclusion.csv`. The
-laptop's true source (`GMOS_observed/master_GMOS_observed.csv`) must absorb
-`data/GMOS_observed_additions_20260902.csv` (same object/ra/dec/program_id
-schema) BEFORE the next `build_exclusion_master.py` run, or these rows
-would be silently dropped by the rebuild. Note that script hardcodes
-instrument = "GMOS", so the 5 GHOST rows would need their instrument
-restored (category stays "GMOS" either way, which is what the observed
-cross-match keys on).
+**Category vocabulary:** Literature / MAGIC_Magellan / nonMAGIC_Magellan /
+**Gemini** — the `instrument` column carries the within-category split
+(MagE/MIKE for Magellan; GMOS/GHOST for Gemini).
+
+**Workstation-side additions:** rows appended outside the laptop source
+ledgers live in `data/ledger_additions_*.csv` (full ledger schema:
+name,ra,dec,category,detail,instrument). `build_exclusion_master.py`
+ingests every such file at the end of a rebuild with a 1" same-category+
+program de-dup, so nothing needs merging by hand any more: additions
+survive rebuilds automatically, and an addition later absorbed into a
+source ledger drops out on its own. Current file:
+`ledger_additions_20260902.csv` — 43 Gemini-observed stars from
+Stringfellow's 2026-09-02 list (38 GMOS across GS-2025B-Q-324 /
+GS-2026A-Q-133, 5 GHOST GS-2026A-FT-201 re-observations).
 
 After a new observing run or GMOS OT export:
 ```bash
