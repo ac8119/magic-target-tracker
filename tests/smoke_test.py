@@ -168,6 +168,30 @@ keep2 = explorer.apply_preselect(rec, {"ebv_sfd98"}, 7, None)
 assert keep2.tolist() == [True, True, True, False, True, True, True]
 print("OK  PRESELECT predicates + cumulative chain")
 
+# LVDB typed host flag: aperture membership, cluster-beats-dwarf, Clouds out
+dw = pd.DataFrame({"name": ["Dwarfy", "LMC"], "ra": [10.0, 80.89],
+                   "dec": [-30.0, -69.76], "rhalf": [10.0, 193.0],
+                   "ellipticity": [0.0, np.nan]})
+cl = pd.DataFrame({"name": ["Clusty"], "ra": [10.0], "dec": [-30.05],
+                   "rhalf": [1.0], "ellipticity": [0.0]})
+# 10 r_h apertures: Dwarfy 100' = 1.67 deg, Clusty 10' = 0.17 deg
+host, typ = explorer.lvdb_host_typed(
+    [10.0, 10.0, 10.0, 80.89, 40.0],        # star2 at 2 deg: outside Dwarfy
+    [-29.5, -30.04, -28.0, -69.76, 0.0], dw, cl)   # star3 = LMC center: excluded
+assert host.tolist() == ["Dwarfy", "Clusty", "", "", ""], host.tolist()
+assert typ.tolist() == ["dwarf", "cluster", "", "", ""], typ.tolist()
+lv = pd.DataFrame({"lvdb_host_type": pd.Categorical(
+    ["dwarf", "cluster", "", ""])})
+for mode, expect in (("Near dwarf", [1, 0, 0, 0]),
+                     ("Near cluster", [0, 1, 0, 0]),
+                     ("Near either", [1, 1, 0, 0]),
+                     ("Isolated (near neither)", [0, 0, 1, 1])):
+    got = explorer.apply_cuts(lv, [{"col": "lvdb_host_type", "kind": "isin",
+                                    "value": explorer.LVDB_CUT_MODES[mode],
+                                    "enabled": True}])
+    assert got.tolist() == [bool(x) for x in expect], (mode, got.tolist())
+print("OK  LVDB typed host flag + proximity cut modes")
+
 # cloud subset maker: cut + schema columns + roundtrip through the loader
 import tempfile as _tf
 from build_cloud_subset import make_subset
@@ -367,6 +391,8 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     # and the filtered-target table gains a sortable in_simbad column
     tab = at2.dataframe[0].value
     assert "in_simbad" in tab.columns and int(tab["in_simbad"].sum()) == 5,         tab.columns.tolist()
+    assert "lvdb_host" in tab.columns and "lvdb_host_type" in tab.columns, \
+        tab.columns.tolist()
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # the seeded selection is first in the table, with a detail line above it

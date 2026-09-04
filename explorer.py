@@ -66,7 +66,7 @@ LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
@@ -174,7 +174,7 @@ FIDUCIAL = {
 # every cut column a Clear-all must switch off
 CUT_COLS = ("pmra", "pmdec", "gi0", "feh", "dist_pc", "ebv", "e_feh",
             "mag_g", "sep_lmc", "sep_smc",
-            "broadband_valid", "gaia_var_flag")
+            "broadband_valid", "gaia_var_flag", "lvdbcut")
 
 # every column a built cache / cloud subset carries
 SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
@@ -183,7 +183,8 @@ SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
                   "feh_ext",
                   "feh_rgb", "e_feh_rgb", "dmod_rgb", "feh_ext_rgb",
                   "feh_ms", "e_feh_ms", "dmod_ms", "feh_ext_ms",
-                  "broadband_valid", "gaia_var_flag", "magerr_cahk"]
+                  "broadband_valid", "gaia_var_flag", "magerr_cahk",
+                  "lvdb_host", "lvdb_host_type"]
 RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g",
               "feh_rgb", "e_feh_rgb", "dmod_rgb",
               "feh_ms", "e_feh_ms", "dmod_ms",
@@ -427,6 +428,7 @@ def build_cache(cat_path, progress=None):
 
     ledger = (pd.read_csv(EXCLUSION_CSV) if os.path.exists(EXCLUSION_CSV)
               else pd.DataFrame(columns=["ra", "dec", "category"]))
+    lvdb_dwarfs, lvdb_clusters = load_lvdb()
 
     frames, missing = [], []
     pres_counts, n_total = {}, 0
@@ -485,6 +487,8 @@ def build_cache(cat_path, progress=None):
             obs_cat, lit_known = classify_against_ledger(ra64, dec64, ledger)
             cols["obs_cat"] = obs_cat
             cols["lit_known"] = lit_known
+            cols["lvdb_host"], cols["lvdb_host_type"] = lvdb_host_typed(
+                ra64, dec64, lvdb_dwarfs, lvdb_clusters)
             frames.append(pd.DataFrame(cols))
             if progress:
                 progress(min(1.0, (start + len(rec)) / n))
@@ -494,6 +498,8 @@ def build_cache(cat_path, progress=None):
     df = pd.concat(frames, ignore_index=True)
     df["star_class"] = df["star_class"].astype("category")
     df["obs_cat"] = df["obs_cat"].astype("category")
+    df["lvdb_host"] = df["lvdb_host"].astype("category")
+    df["lvdb_host_type"] = df["lvdb_host_type"].astype("category")
 
     print(f"pre-selection: {n_total:,} rows in")
     for col, rule, _ in PRESELECT:
@@ -505,6 +511,9 @@ def build_cache(cat_path, progress=None):
     meta = _make_meta(df, cat_path, missing)
     meta["preselect"] = {"n_input": int(n_total), "chain": pres_counts,
                          "skipped": pres_skipped}
+    meta["lvdb_n_rh"] = DEFAULT_N_RH   # aperture the host columns were built with
+    meta["lvdb_hosted"] = {t: int((df["lvdb_host_type"] == t).sum())
+                           for t in ("dwarf", "cluster")}
     os.makedirs(CACHE_DIR, exist_ok=True)
     pq, js = cache_paths(cat_path)
     df.to_parquet(pq, index=False)
@@ -723,6 +732,28 @@ def lvdb_host(star_ra, star_dec, systems, n_rh=DEFAULT_N_RH,
         if idx:
             host[idx] = str(sy["name"])
     return host
+
+
+def lvdb_host_typed(star_ra, star_dec, dwarfs, clusters, n_rh=DEFAULT_N_RH):
+    """(host, host_type) per star from the precomputable LVDB proximity flag:
+    host_type is "dwarf" or "cluster" ("" = near neither). Where a star sits
+    inside both a dwarf and a cluster aperture (gc_dwarf_hosted clusters live
+    inside their dwarfs), the cluster wins — it is the more specific host.
+    Same defaults as lvdb_host: circularized r_half, Clouds excluded."""
+    dh = lvdb_host(star_ra, star_dec, dwarfs, n_rh=n_rh)
+    ch = lvdb_host(star_ra, star_dec, clusters, n_rh=n_rh)
+    host = np.where(ch != "", ch, dh)
+    htype = np.where(ch != "", "cluster", np.where(dh != "", "dwarf", ""))
+    return host.astype(object), htype.astype(object)
+
+
+LVDB_CUT_MODES = {   # "near an LVDB system" cut -> allowed lvdb_host_type
+    "Near dwarf": ["dwarf"],
+    "Near cluster": ["cluster"],
+    "Near either": ["dwarf", "cluster"],
+    "Isolated (near neither)": [""],
+}
+LVDB_NEAR_COLOR = "#e377c2"   # on-sky ring for stars near an LVDB system
 
 
 # ──────────────────────── SIMBAD cross-match ────────────────────────
@@ -1157,6 +1188,19 @@ def render():
         if not any_flag:
             st.caption("This catalog carries no mpflags quality columns.")
 
+        if "lvdb_host_type" in df.columns:
+            on = st.checkbox(
+                "LVDB proximity cut", key=f"{key}:lvdbcut:on",
+                help="Precomputed at cache build: a star is 'near' a system "
+                     f"when it falls inside {meta.get('lvdb_n_rh', DEFAULT_N_RH):g} "
+                     "circularized r_half of an LVDB dwarf (dwarf_mw) or MW "
+                     "star cluster (gc_* tables); Clouds excluded — use the "
+                     "Excise Clouds cuts for those.")
+            mode = st.selectbox("LVDB proximity", list(LVDB_CUT_MODES),
+                                key=f"{key}:lvdbcut", disabled=not on,
+                                label_visibility="collapsed")
+            add(on, "lvdb_host_type", "isin", LVDB_CUT_MODES[mode])
+
         st.subheader("Excise Clouds")
         for name, (cra, cdec, rdef), col in (("LMC", LMC, "sep_lmc"),
                                              ("SMC", SMC, "sep_smc")):
@@ -1331,6 +1375,23 @@ def panel_sky(df, mask, ui):
         fig.add_trace(_density_or_scatter(go, x, y, "targets"))
     obs_us = mask & (np.asarray(df["obs_cat"]) != "")
     lit = mask & np.asarray(df["lit_known"]) & ~obs_us
+    if "lvdb_host" in df.columns:
+        near = mask & (df["lvdb_host"].astype(str).to_numpy() != "")
+        n_near = int(near.sum())
+        if n_near:
+            pos = np.flatnonzero(near)
+            sampled = n_near > SCATTER_MAX
+            if sampled:   # display-only decimation, like the density layer
+                pos = np.random.default_rng(0).choice(pos, SCATTER_MAX,
+                                                      replace=False)
+            fig.add_trace(go.Scattergl(
+                x=df[xc].to_numpy()[pos], y=df[yc].to_numpy()[pos],
+                mode="markers",
+                name="Near LVDB system" + (" (sampled)" if sampled else ""),
+                customdata=df["lvdb_host"].astype(str).to_numpy()[pos],
+                hovertemplate="%{customdata}<extra>Near LVDB system</extra>",
+                marker=dict(symbol="circle-open", size=10,
+                            color=LVDB_NEAR_COLOR, line=dict(width=1))))
     for sel, name, marker in (
             (obs_us, "observed by us",
              dict(symbol="x", size=7, color="#e45756")),
@@ -1550,12 +1611,13 @@ def panel_table(df, mask, ui):
         return
     cols = [c for c in ("ra", "dec", "star_class", "feh", "e_feh", "dmod",
                         "gi0", "mag_g", "pmra", "pmdec", "ebv",
-                        "obs_cat", "lit_known") if c in df.columns]
+                        "obs_cat", "lit_known", "lvdb_host", "lvdb_host_type")
+            if c in df.columns]
     tab = df.loc[mask, cols].copy()
     tab["in_simbad"] = np.asarray(ui["sim_mask"])[tab.index]  # sortable
-    flag = ui.get("lvdb_flag")
+    flag = ui.get("lvdb_flag")   # the runtime custom-aperture flag, if on
     if flag is not None and (np.asarray(flag) != "").any():
-        tab["lvdb_host"] = np.asarray(flag, dtype=object)[tab.index]
+        tab["lvdb_host_custom"] = np.asarray(flag, dtype=object)[tab.index]
     # empty until a SIMBAD query has run (sep stays numeric for Arrow/sorting)
     tab["simbad_main_id"] = ""
     tab["simbad_main_type"] = ""
