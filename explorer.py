@@ -66,7 +66,7 @@ LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
@@ -222,7 +222,7 @@ SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
                   "feh_rgb", "e_feh_rgb", "dmod_rgb", "feh_ext_rgb",
                   "feh_ms", "e_feh_ms", "dmod_ms", "feh_ext_ms",
                   "broadband_valid", "gaia_var_flag", "magerr_cahk",
-                  "lvdb_host", "lvdb_host_type"]
+                  "lvdb_host", "lvdb_host_type", "obs_instrument"]
 RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g",
               "feh_rgb", "e_feh_rgb", "dmod_rgb",
               "feh_ms", "e_feh_ms", "dmod_ms",
@@ -434,28 +434,34 @@ def _make_meta(df, catalog, missing=()):
 def classify_against_ledger(ra, dec, ledger, radius_arcsec=MATCH_RADIUS_ARCSEC):
     """Category-aware ledger cross-match at radius_arcsec.
 
-    Returns (obs_cat, lit_known): obs_cat is the OBSERVED_CATEGORIES category
-    of the nearest observation within the radius ("" if none — an observation
-    always beats a literature entry), lit_known flags a Literature entry
-    within the radius.
+    Returns (obs_cat, obs_inst, lit_known): obs_cat is the
+    OBSERVED_CATEGORIES category of the nearest observation within the radius
+    ("" if none — an observation always beats a literature entry), obs_inst
+    that row's instrument (GMOS/GHOST for Gemini, MagE/MIKE for Magellan) for
+    per-star display labels, lit_known flags a Literature entry within the
+    radius.
     """
     from scipy.spatial import cKDTree
     chord = 2 * np.sin(np.radians(radius_arcsec / 3600.0) / 2)
     xyz = _unit_vectors(ra, dec)
     obs_cat = np.full(len(xyz), "", dtype=object)
+    obs_inst = np.full(len(xyz), "", dtype=object)
     lit_known = np.zeros(len(xyz), dtype=bool)
     obs = ledger[ledger["category"].isin(OBSERVED_CATEGORIES)]
     if len(obs):
         d, i = cKDTree(_unit_vectors(obs["ra"].values, obs["dec"].values)).query(
             xyz, k=1, distance_upper_bound=chord)
         hit = d <= chord
-        obs_cat[hit] = obs["category"].values[np.clip(i[hit], 0, len(obs) - 1)]
+        ii = np.clip(i[hit], 0, len(obs) - 1)
+        obs_cat[hit] = obs["category"].values[ii]
+        if "instrument" in obs.columns:
+            obs_inst[hit] = obs["instrument"].fillna("").astype(str).values[ii]
     lit = ledger[ledger["category"] == "Literature"]
     if len(lit):
         d, _ = cKDTree(_unit_vectors(lit["ra"].values, lit["dec"].values)).query(
             xyz, k=1, distance_upper_bound=chord)
         lit_known = d <= chord
-    return obs_cat, lit_known
+    return obs_cat, obs_inst, lit_known
 
 
 def build_cache(cat_path, progress=None):
@@ -522,8 +528,10 @@ def build_cache(cat_path, progress=None):
             cols["b"] = gal.b.deg.astype(np.float32)
             cols["sep_lmc"] = _angsep_deg(LMC[0], LMC[1], ra64, dec64).astype(np.float32)
             cols["sep_smc"] = _angsep_deg(SMC[0], SMC[1], ra64, dec64).astype(np.float32)
-            obs_cat, lit_known = classify_against_ledger(ra64, dec64, ledger)
+            obs_cat, obs_inst, lit_known = classify_against_ledger(
+                ra64, dec64, ledger)
             cols["obs_cat"] = obs_cat
+            cols["obs_instrument"] = obs_inst
             cols["lit_known"] = lit_known
             cols["lvdb_host"], cols["lvdb_host_type"] = lvdb_host_typed(
                 ra64, dec64, lvdb_dwarfs, lvdb_clusters)
@@ -536,6 +544,7 @@ def build_cache(cat_path, progress=None):
     df = pd.concat(frames, ignore_index=True)
     df["star_class"] = df["star_class"].astype("category")
     df["obs_cat"] = df["obs_cat"].astype("category")
+    df["obs_instrument"] = df["obs_instrument"].astype("category")
     df["lvdb_host"] = df["lvdb_host"].astype("category")
     df["lvdb_host_type"] = df["lvdb_host_type"].astype("category")
 
@@ -1374,8 +1383,14 @@ def move_selected_first(tab, sel_rows):
 def star_detail(df, row, sim):
     """One-line summary of a single star (df row position) for the table."""
     r = df.iloc[row]
-    status = (str(r["obs_cat"]) if str(r["obs_cat"])
-              else ("literature-known" if bool(r["lit_known"]) else "unobserved"))
+    if str(r["obs_cat"]):
+        # per-star provenance reads as the instrument (GMOS/GHOST/MagE/MIKE);
+        # category-level accounting elsewhere stays Gemini/Magellan
+        inst = (str(r["obs_instrument"])
+                if "obs_instrument" in df.columns else "")
+        status = f"observed: {inst or r['obs_cat']}"
+    else:
+        status = "literature-known" if bool(r["lit_known"]) else "unobserved"
     line = (f"**({r['ra']:.5f}, {r['dec']:.5f})** · g = {r['mag_g']:.2f} · "
             f"[Fe/H] = {r['feh']:.2f} ± {r['e_feh']:.2f} · "
             f"dmod = {r['dmod']:.2f} · {r['star_class']} · {status}")
@@ -1441,17 +1456,24 @@ def panel_sky(df, mask, ui):
                 hovertemplate="%{customdata}<extra>Near LVDB system</extra>",
                 marker=dict(symbol="circle-open", size=12,
                             color=LVDB_NEAR_COLOR, line=dict(width=1))))
-    for sel, name, marker in (
+    inst_all = (df["obs_instrument"].astype(str).to_numpy()
+                if "obs_instrument" in df.columns else None)
+    for sel, name, marker, cdata in (
             (obs_us, "observed by us",
-             dict(symbol="x", size=9, color="#e45756")),
+             dict(symbol="x", size=9, color="#e45756"), inst_all),
             (lit, "literature-known",
-             dict(symbol="circle-open", size=9, color="#f58518")),
+             dict(symbol="circle-open", size=9, color="#f58518"), None),
             (ui["sim_mask"], "In SIMBAD",
-             dict(symbol="diamond-open", size=10, color=SIMBAD_COLOR))):
+             dict(symbol="diamond-open", size=10, color=SIMBAD_COLOR), None)):
         if sel.any():
+            kw = {}
+            if cdata is not None:   # hover names the instrument (GMOS/GHOST/
+                kw = dict(customdata=cdata[sel],   # MagE/MIKE), not the bucket
+                          hovertemplate="%{customdata}"
+                                        "<extra>observed by us</extra>")
             fig.add_trace(go.Scattergl(
                 x=df[xc].to_numpy()[sel], y=df[yc].to_numpy()[sel],
-                mode="markers", name=name, marker=marker))
+                mode="markers", name=name, marker=marker, **kw))
 
     occ = occupancy_grid(df["ra"].to_numpy()[mask], df["dec"].to_numpy()[mask])
     dwarfs, clusters = load_lvdb()
@@ -1660,7 +1682,8 @@ def panel_table(df, mask, ui):
         return
     cols = [c for c in ("ra", "dec", "star_class", "feh", "e_feh", "dmod",
                         "gi0", "mag_g", "pmra", "pmdec", "ebv",
-                        "obs_cat", "lit_known", "lvdb_host", "lvdb_host_type")
+                        "obs_cat", "obs_instrument", "lit_known",
+                        "lvdb_host", "lvdb_host_type")
             if c in df.columns]
     tab = df.loc[mask, cols].copy()
     tab["in_simbad"] = np.asarray(ui["sim_mask"])[tab.index]  # sortable

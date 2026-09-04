@@ -49,6 +49,7 @@ syn = pd.DataFrame({
     "star_class": pd.Categorical(["RGB", "MS", "ambiguous", "RGB", "MS", "RGB"]),
     "sep_lmc":  [10.0, 2.0, 8.0, 20.0, 1.0, 30.0],
     "obs_cat":  ["MAGIC_Magellan", "", "", "Gemini", "", ""],
+    "obs_instrument": ["MagE", "", "", "GHOST", "", ""],
     "lit_known": [True, False, False, False, False, True],
 })
 cuts = [
@@ -91,11 +92,14 @@ assert not explorer.occupied(np.array([]), np.array([]), m_ra, m_dec).any()
 ledger = pd.DataFrame({
     "ra":       [10.0, 10.0, 20.0, 30.0],
     "dec":      [-1.0, -1.0, -2.0, -3.0],
-    "category": ["MAGIC_Magellan", "Literature", "Literature", "Gemini"]})
-oc, lk = explorer.classify_against_ledger(
+    "category": ["MAGIC_Magellan", "Literature", "Literature", "Gemini"],
+    "instrument": ["MagE", "", "", "GHOST"]})
+oc, oi, lk = explorer.classify_against_ledger(
     np.array([10.0, 20.0, 30.0]), np.array([-1.0, -2.0, -3.0]), ledger)
-# Gemini (GMOS or GHOST rows alike) counts as observed-by-us
+# Gemini (GMOS or GHOST rows alike) counts as observed-by-us; the
+# per-star label carries the instrument through
 assert oc.tolist() == ["MAGIC_Magellan", "", "Gemini"], oc.tolist()
+assert oi.tolist() == ["MagE", "", "GHOST"], oi.tolist()
 assert lk.tolist() == [True, True, False], lk.tolist()
 assert "Gemini" in explorer.OBSERVED_CATEGORIES
 assert "GMOS" not in explorer.OBSERVED_CATEGORIES
@@ -130,7 +134,10 @@ detail = explorer.star_detail(syn2, 5, sim)
 assert "[Fe/H] = -2.80" in detail and "literature-known" in detail, detail
 assert "SIMBAD" not in detail
 detail3 = explorer.star_detail(syn2, 3, sim)   # sim has row 3 (HD 1)
-assert "SIMBAD: HD 1" in detail3 and "Gemini" in detail3, detail3
+# the per-star label is the instrument, not the Gemini umbrella
+assert "SIMBAD: HD 1" in detail3 and "observed: GHOST" in detail3, detail3
+assert "Gemini" not in detail3, detail3
+assert "observed: MagE" in explorer.star_detail(syn2, 0, sim)
 # per-user catalog globs + allowlisted runtime paths
 fake_secrets = {"catalogs": {
     "globs": ["/data/magic/*.fits"],
@@ -442,6 +449,7 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert "in_simbad" in tab.columns and int(tab["in_simbad"].sum()) == 5,         tab.columns.tolist()
     assert "lvdb_host" in tab.columns and "lvdb_host_type" in tab.columns, \
         tab.columns.tolist()
+    assert "obs_instrument" in tab.columns, tab.columns.tolist()
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # the seeded selection is first in the table, with a detail line above it
