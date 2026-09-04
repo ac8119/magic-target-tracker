@@ -1357,7 +1357,7 @@ def render():
 
         import inspect
         ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
-              "cuts": cuts, "lvdb_flag": lvdb_flag,
+              "cuts": cuts, "lvdb_flag": lvdb_flag, "assumed_sfx": sfx,
               # click-to-highlight: selected df row positions live under
               # sel_key; the e_feh panel writes it (plotly selection events,
               # Streamlit >= 1.35 only), the table panel consumes it
@@ -1380,8 +1380,10 @@ def move_selected_first(tab, sel_rows):
     return pd.concat([tab.loc[sel], tab.drop(index=sel)]), sel
 
 
-def star_detail(df, row, sim):
-    """One-line summary of a single star (df row position) for the table."""
+def star_detail(df, row, sim, sfx=""):
+    """One-line summary of a single star (df row position) for the table.
+    sfx labels the metallicity/distance values by assumption mode ("_rgb",
+    "_ms", or "" for values matching each star's own star_class)."""
     r = df.iloc[row]
     if str(r["obs_cat"]):
         # per-star provenance reads as the instrument (GMOS/GHOST/MagE/MIKE);
@@ -1392,8 +1394,8 @@ def star_detail(df, row, sim):
     else:
         status = "literature-known" if bool(r["lit_known"]) else "unobserved"
     line = (f"**({r['ra']:.5f}, {r['dec']:.5f})** · g = {r['mag_g']:.2f} · "
-            f"[Fe/H] = {r['feh']:.2f} ± {r['e_feh']:.2f} · "
-            f"dmod = {r['dmod']:.2f} · {r['star_class']} · {status}")
+            f"[Fe/H]{sfx} = {r['feh']:.2f} ± {r['e_feh']:.2f} · "
+            f"dmod{sfx} = {r['dmod']:.2f} · {r['star_class']} · {status}")
     if row in sim.index:
         line += (f" · SIMBAD: {sim.loc[row, 'simbad_main_id']} "
                  f"({sim.loc[row, 'simbad_main_type']})")
@@ -1686,6 +1688,11 @@ def panel_table(df, mask, ui):
                         "lvdb_host", "lvdb_host_type")
             if c in df.columns]
     tab = df.loc[mask, cols].copy()
+    sfx = ui.get("assumed_sfx", "")
+    if sfx:   # values already ARE this mode's values — labeling only
+        tab = tab.rename(columns={c: c + sfx
+                                  for c in ("feh", "e_feh", "dmod")
+                                  if c in tab.columns})
     tab["in_simbad"] = np.asarray(ui["sim_mask"])[tab.index]  # sortable
     flag = ui.get("lvdb_flag")   # the runtime custom-aperture flag, if on
     if flag is not None and (np.asarray(flag) != "").any():
@@ -1705,7 +1712,7 @@ def panel_table(df, mask, ui):
     sel_rows = st.session_state.get(ui["sel_key"], [])
     tab, sel = move_selected_first(tab, sel_rows)
     for r in sel[:5]:
-        st.markdown(star_detail(df, r, ui["sim"]))
+        st.markdown(star_detail(df, r, ui["sim"], sfx=ui.get("assumed_sfx", "")))
     if len(sel) > 5:
         st.caption(f"... and {len(sel) - 5} more selected rows")
     if ui.get("click_note") and sel:

@@ -138,6 +138,8 @@ detail3 = explorer.star_detail(syn2, 3, sim)   # sim has row 3 (HD 1)
 assert "SIMBAD: HD 1" in detail3 and "observed: GHOST" in detail3, detail3
 assert "Gemini" not in detail3, detail3
 assert "observed: MagE" in explorer.star_detail(syn2, 0, sim)
+d_sfx = explorer.star_detail(syn2, 0, sim, sfx="_rgb")
+assert "[Fe/H]_rgb =" in d_sfx and "dmod_rgb =" in d_sfx, d_sfx
 # per-user catalog globs + allowlisted runtime paths
 fake_secrets = {"catalogs": {
     "globs": ["/data/magic/*.fits"],
@@ -450,6 +452,12 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert "lvdb_host" in tab.columns and "lvdb_host_type" in tab.columns, \
         tab.columns.tolist()
     assert "obs_instrument" in tab.columns, tab.columns.tolist()
+    # fiducial state has Assumed = RGB, so the value columns are labeled by
+    # the assumption mode in the table (and hence the CSV download)
+    assert "feh_rgb" in tab.columns and "e_feh_rgb" in tab.columns \
+        and "dmod_rgb" in tab.columns, tab.columns.tolist()
+    assert "feh" not in tab.columns and "dmod" not in tab.columns, \
+        tab.columns.tolist()
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # the seeded selection is first in the table, with a detail line above it
