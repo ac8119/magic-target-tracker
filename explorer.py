@@ -206,6 +206,8 @@ FIDUCIAL = {
     # Gaia-flagged variables excluded (unsuitable for photometric [Fe/H])
     "broadband_valid": True,  # tick the 'broadband_valid only' quality flag
     "gaia_var_flag": True,    # tick the 'exclude Gaia variables' flag
+    "feh_ext": True,          # exclude grid-extrapolated [Fe/H] — unreliable
+                              # for targeting (fehs_ext_rgb under Assumed=RGB)
     "sep_lmc": 5.0,           # excision radius around the LMC (deg)
     "sep_smc": 3.0,           # excision radius around the SMC (deg)
 }
@@ -1005,7 +1007,7 @@ def _queue_fiducial(st, key, rng):
             # reset to "Matching star_class" later if this catalog has no
             # per-class columns (the radio validates against its own options)
             st.session_state[key + ":assumed"] = val
-        elif col in ("broadband_valid", "gaia_var_flag"):
+        elif col in ("broadband_valid", "gaia_var_flag", "feh_ext"):
             # quality-flag checkboxes: True just switches the cut on
             st.session_state[f"{key}:{col}:on"] = bool(val)
         elif col in ("sep_lmc", "sep_smc") or rng.get(col):

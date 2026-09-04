@@ -407,9 +407,9 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
             fid.append({"col": col, "kind": "range", "value": (1.0, 1.0),
                         "enabled": bool(val)})
             continue
-        if col == "gaia_var_flag":       # ... exclude-variable
-            fid.append({"col": col, "kind": "range", "value": (0.0, 0.0),
-                        "enabled": bool(val)})
+        if col in ("gaia_var_flag", "feh_ext"):   # exclude-variable /
+            fid.append({"col": col, "kind": "range",  # no-extrapolation
+                        "value": (0.0, 0.0), "enabled": bool(val)})
             continue
         kind = "min" if col.startswith("sep_") else (
             "range" if isinstance(val, tuple) else "max")
@@ -445,7 +445,7 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert a2.value == "RGB", a2.value
     # fiducial also switches both quality flags on
     ck2 = {c.key: c.value for c in at2.checkbox}
-    for col in ("broadband_valid", "gaia_var_flag"):
+    for col in ("broadband_valid", "gaia_var_flag", "feh_ext"):
         k = next(k for k in ck2 if k.endswith(f":{col}:on"))
         assert ck2[k] is True, (col, ck2[k])
     # Assumed = RGB means no ambiguous-cut warning despite the feh cut
