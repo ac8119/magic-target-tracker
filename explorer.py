@@ -955,6 +955,18 @@ def _git_commit():
         return "unknown"
 
 
+def selection_bundle(tab, manifest_text, stem):
+    """One click, both files: an in-memory ZIP holding the plain CSV
+    (targets_<stem>.csv) and the manifest (README_<stem>.txt)."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"targets_{stem}.csv", tab.to_csv(index=False))
+        z.writestr(f"README_{stem}.txt", manifest_text)
+    return buf.getvalue()
+
+
 def selection_manifest(ctx):
     """Plain-text reproducibility manifest: same catalog + repo commit +
     this file => the exact same filtered table. Field order is fixed so
@@ -1530,8 +1542,7 @@ def render():
         stem = os.path.splitext(os.path.basename(ref))[0]
         ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
               "cuts": cuts, "lvdb_flag": lvdb_flag, "assumed_sfx": sfx,
-              "manifest": manifest_ctx,
-              "manifest_fname": f"README_{stem}.txt",
+              "manifest": manifest_ctx, "catalog_stem": stem,
               # click-to-highlight: selected df row positions live under
               # sel_key; the e_feh panel writes it (plotly selection events,
               # Streamlit >= 1.35 only), the table panel consumes it
@@ -1913,17 +1924,19 @@ def panel_table(df, mask, ui):
         st.dataframe(disp, use_container_width=True)
     if n > 5000:
         st.caption("showing the first 5,000 rows — the download has all of them")
-    c_dl1, c_dl2 = st.columns(2)
-    c_dl1.download_button("Download filtered targets CSV",
-                          tab.to_csv(index=False).encode(),
-                          "explorer_targets.csv", "text/csv")
+    stem = ui.get("catalog_stem", "selection")
     if ui.get("manifest"):
         txt = selection_manifest(ui["manifest"])
-        fname = ui.get("manifest_fname", "README_selection.txt")
         # stashed for tests: button payloads are not introspectable
         st.session_state[ui["key"] + ":manifest_txt"] = txt
-        st.session_state[ui["key"] + ":manifest_fname"] = fname
-        c_dl2.download_button(fname, txt.encode(), fname, "text/plain")
+        st.session_state[ui["key"] + ":bundle_stem"] = stem
+        st.download_button("Download filtered targets (.zip)",
+                           selection_bundle(tab, txt, stem),
+                           f"targets_{stem}.zip", "application/zip")
+    else:   # no manifest context (should not happen) — plain CSV fallback
+        st.download_button("Download filtered targets CSV",
+                           tab.to_csv(index=False).encode(),
+                           f"targets_{stem}.csv", "text/csv")
 
 
 PANELS = [

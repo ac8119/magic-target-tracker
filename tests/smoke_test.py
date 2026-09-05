@@ -528,20 +528,23 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert "live SIMBAD TAP" in man and "radius=1 arcsec" in man
     assert "ledger: data/master_exclusion.csv rows=" in man
     assert "cache_schema: v8" in man and "app_commit: " in man
-    # plain CSV again (no comment header); manifest is its own README file
+    # one click, both files: the ZIP holds exactly the plain CSV + README
     import io
-    plain = tab.to_csv(index=False)
-    assert not plain.startswith("#")
-    rt = pd.read_csv(io.StringIO(plain))          # no comment= needed
-    assert rt.shape == tab.shape, (rt.shape, tab.shape)
-    assert rt.columns.tolist() == tab.columns.tolist()
-    assert (rt["source_id"].astype("Int64").fillna(-1).to_numpy()
-            == tab["source_id"].astype("Int64").fillna(-1).to_numpy()).all()
-    assert not hasattr(explorer, "csv_with_manifest")
+    import zipfile
     stem = os.path.splitext(explorer.DEFAULT_CATALOG)[0]
-    assert at2.session_state[f"{ekey}:manifest_fname"] == \
-        f"README_{stem}.txt", at2.session_state[f"{ekey}:manifest_fname"]
-    print("OK  plain CSV + README_<catalog>.txt manifest download")
+    assert at2.session_state[f"{ekey}:bundle_stem"] == stem
+    blob = explorer.selection_bundle(tab, man, stem)
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        names = sorted(z.namelist())
+        assert names == sorted([f"targets_{stem}.csv",
+                                f"README_{stem}.txt"]), names
+        rt = pd.read_csv(io.BytesIO(z.read(f"targets_{stem}.csv")))
+        assert rt.shape == tab.shape, (rt.shape, tab.shape)
+        assert rt.columns.tolist() == tab.columns.tolist()
+        assert (rt["source_id"].astype("Int64").fillna(-1).to_numpy()
+                == tab["source_id"].astype("Int64").fillna(-1).to_numpy()).all()
+        assert z.read(f"README_{stem}.txt").decode() == man
+    print("OK  single-click ZIP bundle (plain CSV + README manifest)")
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # the seeded selection is first in the table, with a detail line above it
