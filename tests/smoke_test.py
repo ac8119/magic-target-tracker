@@ -140,6 +140,7 @@ assert "Gemini" not in detail3, detail3
 assert "observed: MagE" in explorer.star_detail(syn2, 0, sim)
 d_sfx = explorer.star_detail(syn2, 0, sim, sfx="_rgb")
 assert "[Fe/H]_rgb =" in d_sfx and "dmod_rgb =" in d_sfx, d_sfx
+assert "distance_rgb = 19,953 pc" in d_sfx, d_sfx   # dmod 16.5
 # per-user catalog globs + allowlisted runtime paths
 fake_secrets = {"catalogs": {
     "globs": ["/data/magic/*.fits"],
@@ -508,6 +509,26 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
         and "dmod_rgb" in tab.columns, tab.columns.tolist()
     assert "feh" not in tab.columns and "dmod" not in tab.columns, \
         tab.columns.tolist()
+    # distance in pc sits next to the mode's dmod, mode-named
+    ci = tab.columns.tolist()
+    assert ci[ci.index("dmod_rgb") + 1] == "distance_rgb", ci
+    d0 = float(tab["distance_rgb"].iloc[0])
+    assert abs(d0 - 10 ** (float(tab["dmod_rgb"].iloc[0]) / 5 + 1)) < 1.0
+
+    # reproducibility manifest reflects the fiducial state
+    man = at2.session_state[f"{ekey}:manifest_txt"]
+    assert man.startswith("MAGIC target explorer — selection manifest"), man[:60]
+    assert "assumed_mode: RGB" in man
+    assert "population_classes: RGB, ambiguous" in man
+    assert "feh: range (-5.0, -3.0) [enabled]" in man, man
+    assert "broadband_valid: range (1.0, 1.0) [enabled]" in man
+    assert "feh_ext: range (0.0, 0.0) [enabled]" in man
+    assert "gi0: range (0.2, 1.5) [enabled]" in man
+    assert f"pass: {want['selected']:,}" in man
+    assert "live SIMBAD TAP" in man and "radius=1 arcsec" in man
+    assert "ledger: data/master_exclusion.csv rows=" in man
+    assert "cache_schema: v8" in man and "app_commit: " in man
+    print("OK  distance column + selection manifest reflect the fiducial")
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # the seeded selection is first in the table, with a detail line above it

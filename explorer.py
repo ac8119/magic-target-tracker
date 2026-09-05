@@ -941,6 +941,53 @@ def append_simbad_cache(df, matches):
     new.to_csv(SIMBAD_CACHE_CSV, index=False)
 
 
+# ──────────────────────── selection manifest ────────────────────────
+def _git_commit():
+    """The running checkout's commit, 'unknown' outside a git checkout
+    (e.g. a cloud container built from an archive)."""
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=APP_DIR, capture_output=True, text=True,
+                             timeout=5)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def selection_manifest(ctx):
+    """Plain-text reproducibility manifest: same catalog + repo commit +
+    this file => the exact same filtered table. Field order is fixed so
+    diffs between two manifests are meaningful."""
+    L = ["MAGIC target explorer — selection manifest",
+         f"generated_utc: {ctx['generated_utc']}",
+         f"app_commit: {ctx['app_commit']}",
+         f"catalog: {ctx['catalog']}",
+         f"catalog_kind: {ctx['catalog_kind']}",
+         f"cache_file: {ctx['cache_file']}",
+         f"cache_schema: v{ctx['cache_schema']}",
+         f"subset_cut: {ctx.get('subset_cut') or '(none — full catalog cache)'}",
+         "preselection (baked into the cache):"]
+    L += [f"  - {r}" for r in ctx["preselection"]]
+    L += [f"population_classes: "
+          f"{', '.join(ctx['population_classes']) or '(none)'}",
+          f"assumed_mode: {ctx['assumed_mode']}",
+          "cuts:"]
+    for c in ctx["cuts"]:
+        if c["col"] == "star_class":
+            continue   # covered by population_classes above
+        state = "enabled" if c.get("enabled") else "disabled"
+        L.append(f"  - {c['col']}: {c['kind']} {c['value']} [{state}]")
+    L += [f"lvdb_runtime_flag: {ctx['lvdb_runtime']}",
+          f"ledger: {ctx['ledger']}",
+          f"literature_counts_as_observed: {ctx['lit_is_observed']}",
+          f"simbad: {ctx['simbad']}",
+          "counts:"]
+    for k, v in ctx["counts"].items():
+        L.append(f"  - {k}: {v:,}")
+    return "\n".join(L) + "\n"
+
+
 # ═══════════════════════════ Streamlit page ═══════════════════════════
 def _st():
     import streamlit as st
@@ -1439,8 +1486,50 @@ def render():
                            "cache; run 'Check SIMBAD' to update.")
 
         import inspect
+        from datetime import datetime, timezone
+        try:
+            led_n = sum(1 for _ in open(EXCLUSION_CSV)) - 1
+            led_mtime = datetime.fromtimestamp(
+                os.path.getmtime(EXCLUSION_CSV),
+                tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            ledger_line = (f"data/master_exclusion.csv rows={led_n} "
+                           f"mtime={led_mtime}")
+        except OSError:
+            ledger_line = "(no ledger file)"
+        manifest_ctx = {
+            "generated_utc": datetime.now(timezone.utc)
+                             .strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "app_commit": _git_commit(),
+            "catalog": choice,
+            "catalog_kind": ("release asset" if kind == "release"
+                             else "local file"),
+            "cache_file": os.path.basename(pq),
+            "cache_schema": SCHEMA_VERSION,
+            "subset_cut": meta.get("subset_cut"),
+            "preselection": (list(meta["preselect"]["chain"])
+                             if meta.get("preselect")
+                             else [r for _, r, _ in PRESELECT]),
+            "population_classes": keep_cls,
+            "assumed_mode": assumed,
+            "cuts": cuts,
+            "lvdb_runtime": (f"on, n_rh={float(n_rh):g}, "
+                             f"exclude_flagged={bool(drop_near)}"
+                             if near_on else "off"),
+            "ledger": ledger_line,
+            "lit_is_observed": bool(lit_obs),
+            "simbad": (f"live SIMBAD TAP ({SIMBAD_TAP_URL}), radius="
+                       f"{SIMBAD_RADIUS_ARCSEC:g} arcsec, X-Match mirror as "
+                       "labeled fallback, queried_this_session="
+                       f"{bool(st.session_state[skey + ':queried'])}"),
+            "counts": {"pass": m["selected"],
+                       "observed_by_us": m["observed_us"],
+                       "literature_known": m["literature"],
+                       "remaining": m["remaining"],
+                       "in_simbad": n_simbad},
+        }
         ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
               "cuts": cuts, "lvdb_flag": lvdb_flag, "assumed_sfx": sfx,
+              "manifest": manifest_ctx,
               # click-to-highlight: selected df row positions live under
               # sel_key; the e_feh panel writes it (plotly selection events,
               # Streamlit >= 1.35 only), the table panel consumes it
@@ -1478,7 +1567,9 @@ def star_detail(df, row, sim, sfx=""):
         status = "literature-known" if bool(r["lit_known"]) else "unobserved"
     line = (f"**({r['ra']:.5f}, {r['dec']:.5f})** · g = {r['mag_g']:.2f} · "
             f"[Fe/H]{sfx} = {r['feh']:.2f} ± {r['e_feh']:.2f} · "
-            f"dmod{sfx} = {r['dmod']:.2f} · {r['star_class']} · {status}")
+            f"dmod{sfx} = {r['dmod']:.2f} · "
+            f"distance{sfx} = {dmod_to_pc(r['dmod']):,.0f} pc · "
+            f"{r['star_class']} · {status}")
     if row in sim.index:
         line += (f" · SIMBAD: {sim.loc[row, 'simbad_main_id']} "
                  f"({sim.loc[row, 'simbad_main_type']})")
@@ -1772,10 +1863,13 @@ def panel_table(df, mask, ui):
                         "lvdb_host", "lvdb_host_type")
             if c in df.columns]
     tab = df.loc[mask, cols].copy()
+    if "dmod" in tab.columns:   # heliocentric distance of the mode's dmod
+        tab.insert(tab.columns.get_loc("dmod") + 1, "distance",
+                   np.round(dmod_to_pc(tab["dmod"]), 1))
     sfx = ui.get("assumed_sfx", "")
     if sfx:   # values already ARE this mode's values — labeling only
         tab = tab.rename(columns={c: c + sfx
-                                  for c in ("feh", "e_feh", "dmod")
+                                  for c in ("feh", "e_feh", "dmod", "distance")
                                   if c in tab.columns})
     tab["in_simbad"] = np.asarray(ui["sim_mask"])[tab.index]  # sortable
     flag = ui.get("lvdb_flag")   # the runtime custom-aperture flag, if on
@@ -1820,6 +1914,12 @@ def panel_table(df, mask, ui):
     st.download_button("Download filtered targets CSV",
                        tab.to_csv(index=False).encode(),
                        "explorer_targets.csv", "text/csv")
+    if ui.get("manifest"):
+        txt = selection_manifest(ui["manifest"])
+        # stashed for tests: the button widget's payload is not introspectable
+        st.session_state[ui["key"] + ":manifest_txt"] = txt
+        st.download_button("Download selection manifest", txt.encode(),
+                           "selection_manifest.txt", "text/plain")
 
 
 PANELS = [
