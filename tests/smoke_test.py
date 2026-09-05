@@ -248,7 +248,10 @@ print("OK  ledger additions ingestion + same-category dedup")
 # cloud subset maker: cut + schema columns + roundtrip through the loader
 import tempfile as _tf
 from build_cloud_subset import make_subset
-big = syn.assign(mag_g=17.0, dmod=16.5, junk_col=1.0)
+big = syn.assign(mag_g=17.0, dmod=16.5, junk_col=1.0,
+                 source_id=pd.array([4906349572689836160, pd.NA,
+                                     6499744678154128640, 5, 6, 7],
+                                    dtype="Int64"))
 sub = make_subset(big, "feh == feh and star_class in ['RGB', 'MS']")
 assert len(sub) == 5, len(sub)   # row 2 (NaN feh AND ambiguous) dropped
 assert "junk_col" not in sub.columns and "obs_cat" in sub.columns
@@ -256,6 +259,11 @@ from build_cloud_subset import write_subset
 pq_tmp = os.path.join(_tf.mkdtemp(), "sub.parquet")
 write_subset(sub, pq_tmp, "feh == feh and star_class in ['RGB', 'MS']")
 back = pd.read_parquet(pq_tmp)
+# 19-digit Gaia ids survive exactly (Int64, never float-mangled), NA blank
+assert str(back["source_id"].dtype) == "Int64", back["source_id"].dtype
+assert back["source_id"].iloc[0] == 4906349572689836160
+csv_txt = back.to_csv(index=False)
+assert "4906349572689836160" in csv_txt and "4.9063" not in csv_txt
 # the row cut travels inside the parquet; absent -> None, never a guess
 assert explorer.subset_cut_from_parquet(pq_tmp) == \
     "feh == feh and star_class in ['RGB', 'MS']"
@@ -474,6 +482,7 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert "lvdb_host" in tab.columns and "lvdb_host_type" in tab.columns, \
         tab.columns.tolist()
     assert "obs_instrument" in tab.columns, tab.columns.tolist()
+    assert "source_id" in tab.columns, tab.columns.tolist()
     # fiducial state has Assumed = RGB, so the value columns are labeled by
     # the assumption mode in the table (and hence the CSV download)
     assert "feh_rgb" in tab.columns and "e_feh_rgb" in tab.columns \

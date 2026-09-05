@@ -66,7 +66,7 @@ LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
 CHUNK = 2_000_000                # FITS -> Parquet conversion chunk (rows)
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # slider bounds = catalog percentiles clipped to these physical windows,
 # so a handful of junk-photometry rows can't stretch a slider to uselessness
@@ -224,7 +224,8 @@ SCHEMA_COLUMNS = ["ra", "dec", "pmra", "pmdec", "ebv", "feh", "e_feh", "dmod",
                   "feh_rgb", "e_feh_rgb", "dmod_rgb", "feh_ext_rgb",
                   "feh_ms", "e_feh_ms", "dmod_ms", "feh_ext_ms",
                   "broadband_valid", "gaia_var_flag", "magerr_cahk",
-                  "lvdb_host", "lvdb_host_type", "obs_instrument"]
+                  "lvdb_host", "lvdb_host_type", "obs_instrument",
+                  "source_id"]
 RANGE_COLS = ("pmra", "pmdec", "ebv", "gi0", "feh", "e_feh", "dmod", "mag_g",
               "feh_rgb", "e_feh_rgb", "dmod_rgb",
               "feh_ms", "e_feh_ms", "dmod_ms",
@@ -511,6 +512,13 @@ def build_cache(cat_path, progress=None):
                 if start == 0:
                     missing.append("gi0")
                 cols["gi0"] = np.full(len(rec), np.nan, dtype=np.float32)
+            if "source_id" in names:
+                sid = np.asarray(rec["source_id"], dtype=np.int64)
+                ids = pd.array(sid, dtype="Int64")
+                ids[sid <= GAIA_NO_MATCH] = pd.NA   # sentinels -> blank
+                cols["source_id"] = ids
+            else:
+                cols["source_id"] = pd.array([pd.NA] * len(rec), dtype="Int64")
             if "star_class" in names:
                 sc = np.char.strip(rec["star_class"].astype(str))
             elif "is_rgb" in names:
@@ -1701,7 +1709,8 @@ def panel_table(df, mask, ui):
         st.caption(f"{n:,} rows — tighten the cuts below {SIMBAD_MAX_ROWS:,} "
                    "to browse or download the target table.")
         return
-    cols = [c for c in ("ra", "dec", "star_class", "feh", "e_feh", "dmod",
+    cols = [c for c in ("ra", "dec", "source_id", "star_class",
+                        "feh", "e_feh", "dmod",
                         "gi0", "mag_g", "pmra", "pmdec", "ebv",
                         "obs_cat", "obs_instrument", "lit_known",
                         "lvdb_host", "lvdb_host_type")
