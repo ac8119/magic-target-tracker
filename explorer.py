@@ -955,6 +955,18 @@ def _git_commit():
         return "unknown"
 
 
+def csv_with_manifest(tab, manifest_text):
+    """One self-contained download: the manifest prepended to the CSV as
+    '#'-commented header lines (the astronomer-standard pattern — TopCat,
+    astropy ascii, and pandas comment='#' all read it cleanly). The column
+    header row is the first non-comment line."""
+    lines = ["# lines starting with # are the selection manifest; "
+             "read with comment='#'"]
+    lines += [f"# {ln}".rstrip()
+              for ln in manifest_text.rstrip("\n").split("\n")]
+    return "\n".join(lines) + "\n" + tab.to_csv(index=False)
+
+
 def selection_manifest(ctx):
     """Plain-text reproducibility manifest: same catalog + repo commit +
     this file => the exact same filtered table. Field order is fixed so
@@ -1911,15 +1923,14 @@ def panel_table(df, mask, ui):
         st.dataframe(disp, use_container_width=True)
     if n > 5000:
         st.caption("showing the first 5,000 rows — the download has all of them")
-    st.download_button("Download filtered targets CSV",
-                       tab.to_csv(index=False).encode(),
-                       "explorer_targets.csv", "text/csv")
+    payload = tab.to_csv(index=False)
     if ui.get("manifest"):
         txt = selection_manifest(ui["manifest"])
         # stashed for tests: the button widget's payload is not introspectable
         st.session_state[ui["key"] + ":manifest_txt"] = txt
-        st.download_button("Download selection manifest", txt.encode(),
-                           "selection_manifest.txt", "text/plain")
+        payload = csv_with_manifest(tab, txt)
+    st.download_button("Download filtered targets CSV (manifest in header)",
+                       payload.encode(), "explorer_targets.csv", "text/csv")
 
 
 PANELS = [
