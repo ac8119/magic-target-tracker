@@ -308,6 +308,25 @@ class FakeSession:
             return FakeResp(200, chunks=[b"PARQ", b"UET!"])
         return FakeResp(404)
 
+# live-TAP backend: chunked upload join, nearest match wins (mocked, no net)
+from astropy.table import Table as _AT
+tap_calls = []
+def fake_tap(adql, up):
+    tap_calls.append(len(up))
+    assert "TAP_UPLOAD.up" in adql and "CIRCLE" in adql
+    if int(up["idx"][0]) == 0:
+        return _AT({"idx": [0, 0], "main_id": ["FAR", "NEAR"],
+                    "otype": ["Star", "RR*"], "sep": [0.9, 0.2]})
+    return _AT({"idx": [2], "main_id": ["C"], "otype": ["Ev*"], "sep": [0.5]})
+tap = explorer.run_simbad_tap([1.0, 2.0, 3.0], [0.0, 0.0, 0.0],
+                              chunk=2, query_fn=fake_tap)
+assert tap_calls == [2, 1], tap_calls
+t_by = tap.set_index("idx")
+assert t_by.loc[0, "simbad_main_id"] == "NEAR"        # nearest wins
+assert 1 not in t_by.index and t_by.loc[2, "simbad_main_id"] == "C"
+assert "v2" in os.path.basename(explorer.SIMBAD_CACHE_CSV)  # mirror cache busted
+print("OK  live SIMBAD TAP backend (chunking, best match, cache bust)")
+
 fs = FakeSession()
 dest = os.path.join(_tf.mkdtemp(), "dl.parquet")
 explorer.fetch_release_asset("o/r", "v1", "sub.parquet", "SECRET", dest,

@@ -61,7 +61,12 @@ MATCH_RADIUS_ARCSEC = 1.0        # ledger cross-match — the 1" MAGIC pipeline
 OBSERVED_CATEGORIES = ("MAGIC_Magellan", "nonMAGIC_Magellan", "Gemini")
 SIMBAD_RADIUS_ARCSEC = 1.0       # CDS X-Match radius (make_targets.py convention)
 SIMBAD_MAX_ROWS = 50_000         # refuse to upload more rows than this to CDS
-SIMBAD_CACHE_CSV = os.path.join(APP_DIR, "data", "simbad_cache.csv")
+# _v2: results from live SIMBAD TAP. The v1 file held CDS X-Match mirror
+# results whose no-matches are known-wrong (the mirror snapshot is incomplete
+# vs live SIMBAD), so the cache name is versioned to bust it.
+SIMBAD_CACHE_CSV = os.path.join(APP_DIR, "data", "simbad_cache_v2.csv")
+SIMBAD_TAP_URL = "https://simbad.cds.unistra.fr/simbad/sim-tap"
+SIMBAD_TAP_CHUNK = 10_000   # rows per synchronous upload-join query
 LMC = (80.89, -69.76, 5.0)       # ra, dec, default excision radius (deg)
 SMC = (13.19, -72.83, 3.0)
 SCATTER_MAX = 150_000            # above this, scatter layers become 2D histograms
@@ -814,15 +819,56 @@ LVDB_NEAR_COLOR = "#e377c2"   # on-sky ring for stars near an LVDB system
 
 
 # ──────────────────────── SIMBAD cross-match ────────────────────────
-# On-demand only (button press): the filtered stars are uploaded to the CDS
-# X-Match service and matched against SIMBAD at SIMBAD_RADIUS_ARCSEC — the
-# same service + radius scripts/make_targets.py uses via stilts cdsskymatch.
-# Implementation uses astroquery.xmatch (already installed; pure Python).
+# On-demand only (button press): the filtered stars are cross-matched against
+# LIVE SIMBAD at SIMBAD_RADIUS_ARCSEC via a TAP upload-join (sim-tap). The
+# CDS X-Match mirror used previously is demonstrably incomplete — e.g.
+# [MFW2011] 26017 at (14.689932, -33.706028) exists in live SIMBAD at 0.197"
+# but is absent from the mirror out to 30" — so X-Match remains only as a
+# clearly-labeled automatic fallback when TAP errors.
 
 SIMBAD_COLS = ["simbad_main_id", "simbad_main_type", "simbad_sep_arcsec"]
 SIMBAD_COLOR = "#2ca02c"   # green used for every "In SIMBAD" overlay
                            # (violet was hard to read on the dmod histogram;
                            # green kept everywhere for consistency)
+
+
+def run_simbad_tap(ra, dec, radius_arcsec=SIMBAD_RADIUS_ARCSEC,
+                   chunk=SIMBAD_TAP_CHUNK, query_fn=None):
+    """Cross-match against LIVE SIMBAD: TAP upload-join on `basic` at
+    radius_arcsec, chunked at `chunk` rows per synchronous query (the
+    explorer's own SIMBAD_MAX_ROWS=50k cap means at most 5 chunks, so the
+    async endpoint is unnecessary). Returns idx + SIMBAD_COLS, best (nearest)
+    match per star. query_fn(adql, upload_table) -> astropy Table is
+    injectable for tests; the default posts to sim-tap via astroquery."""
+    if query_fn is None:
+        from astroquery.simbad import Simbad
+        def query_fn(adql, up):
+            return Simbad.query_tap(adql, maxrec=2 * chunk, up=up)
+    from astropy.table import Table
+    ra = np.asarray(ra, float)
+    dec = np.asarray(dec, float)
+    adql = ("SELECT up.idx, b.main_id, b.otype, "
+            "DISTANCE(POINT('ICRS', up.ra, up.dec), "
+            "POINT('ICRS', b.ra, b.dec)) * 3600.0 AS sep "
+            "FROM TAP_UPLOAD.up AS up "
+            "JOIN basic AS b ON 1 = CONTAINS(POINT('ICRS', b.ra, b.dec), "
+            f"CIRCLE('ICRS', up.ra, up.dec, {radius_arcsec / 3600.0:.10f}))")
+    frames = []
+    for s in range(0, len(ra), chunk):
+        up = Table({"idx": np.arange(s, min(s + chunk, len(ra))),
+                    "ra": ra[s:s + chunk], "dec": dec[s:s + chunk]})
+        res = query_fn(adql, up)
+        if res is not None and len(res):
+            frames.append(res.to_pandas())
+    if not frames:
+        return pd.DataFrame(columns=["idx"] + SIMBAD_COLS)
+    r = pd.concat(frames, ignore_index=True).sort_values("sep")
+    r = r.drop_duplicates("idx")
+    return pd.DataFrame({
+        "idx": r["idx"].astype(int).values,
+        "simbad_main_id": r["main_id"].astype(str).values,
+        "simbad_main_type": r["otype"].astype(str).values,
+        "simbad_sep_arcsec": r["sep"].astype(float).round(2).values})
 
 
 def run_simbad_xmatch(ra, dec, radius_arcsec=SIMBAD_RADIUS_ARCSEC):
@@ -846,7 +892,7 @@ def run_simbad_xmatch(ra, dec, radius_arcsec=SIMBAD_RADIUS_ARCSEC):
         "simbad_sep_arcsec": r["angDist"].round(2).values})
 
 
-def merge_simbad(df, mask, xmatch_fn=run_simbad_xmatch):
+def merge_simbad(df, mask, xmatch_fn=run_simbad_tap):
     """Cross-match the filtered rows of df against SIMBAD.
 
     Returns a DataFrame with SIMBAD_COLS indexed by df row position (matches
@@ -1348,9 +1394,22 @@ def render():
             if h in st.session_state[skey + ":queried"]:
                 st.info("This exact selection was already checked this session.")
             else:
+                res = None
                 try:
-                    with st.spinner("Querying CDS X-Match against SIMBAD ..."):
+                    with st.spinner("Querying live SIMBAD (TAP upload join) ..."):
                         res = merge_simbad(df, mask)
+                except Exception as e_tap:
+                    st.warning(f"Live SIMBAD TAP failed ({e_tap}) — falling "
+                               "back to the CDS X-Match mirror, which is "
+                               "KNOWN INCOMPLETE: treat no-matches with care.")
+                    try:
+                        with st.spinner("Querying the CDS X-Match mirror ..."):
+                            res = merge_simbad(df, mask,
+                                               xmatch_fn=run_simbad_xmatch)
+                    except Exception as e_xm:
+                        st.warning(f"X-Match fallback failed too (offline or "
+                                   f"CDS error) — the app keeps working: {e_xm}")
+                if res is not None:
                     append_simbad_cache(df, res)
                     sim = st.session_state[skey]
                     st.session_state[skey] = pd.concat(
@@ -1358,9 +1417,6 @@ def render():
                     st.session_state[skey + ":queried"].add(h)
                     st.success(f"{len(res):,} of {n_sel:,} filtered stars "
                                f"are in SIMBAD.")
-                except Exception as e:
-                    st.warning(f"SIMBAD X-Match failed (offline or CDS "
-                               f"service error) — the app keeps working: {e}")
         if over:
             st.caption(f"SIMBAD check disabled: {n_sel:,} rows exceed the "
                        f"{SIMBAD_MAX_ROWS:,} upload cap — tighten the cuts.")

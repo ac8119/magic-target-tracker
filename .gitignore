@@ -11,7 +11,7 @@ data/target_runs.csv
 data/explorer_cache/
 
 # on-demand SIMBAD X-Match results (coordinates - public repo, keep local)
-data/simbad_cache.csv
+data/simbad_cache*.csv
 
 # cloud subset outputs (upload to a private release, never commit)
 *_cloud_subset.parquet
