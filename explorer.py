@@ -955,18 +955,6 @@ def _git_commit():
         return "unknown"
 
 
-def csv_with_manifest(tab, manifest_text):
-    """One self-contained download: the manifest prepended to the CSV as
-    '#'-commented header lines (the astronomer-standard pattern — TopCat,
-    astropy ascii, and pandas comment='#' all read it cleanly). The column
-    header row is the first non-comment line."""
-    lines = ["# lines starting with # are the selection manifest; "
-             "read with comment='#'"]
-    lines += [f"# {ln}".rstrip()
-              for ln in manifest_text.rstrip("\n").split("\n")]
-    return "\n".join(lines) + "\n" + tab.to_csv(index=False)
-
-
 def selection_manifest(ctx):
     """Plain-text reproducibility manifest: same catalog + repo commit +
     this file => the exact same filtered table. Field order is fixed so
@@ -1539,9 +1527,11 @@ def render():
                        "remaining": m["remaining"],
                        "in_simbad": n_simbad},
         }
+        stem = os.path.splitext(os.path.basename(ref))[0]
         ui = {"st": st, "key": key, "sim": sim, "sim_mask": sim_mask,
               "cuts": cuts, "lvdb_flag": lvdb_flag, "assumed_sfx": sfx,
               "manifest": manifest_ctx,
+              "manifest_fname": f"README_{stem}.txt",
               # click-to-highlight: selected df row positions live under
               # sel_key; the e_feh panel writes it (plotly selection events,
               # Streamlit >= 1.35 only), the table panel consumes it
@@ -1923,14 +1913,17 @@ def panel_table(df, mask, ui):
         st.dataframe(disp, use_container_width=True)
     if n > 5000:
         st.caption("showing the first 5,000 rows — the download has all of them")
-    payload = tab.to_csv(index=False)
+    c_dl1, c_dl2 = st.columns(2)
+    c_dl1.download_button("Download filtered targets CSV",
+                          tab.to_csv(index=False).encode(),
+                          "explorer_targets.csv", "text/csv")
     if ui.get("manifest"):
         txt = selection_manifest(ui["manifest"])
-        # stashed for tests: the button widget's payload is not introspectable
+        fname = ui.get("manifest_fname", "README_selection.txt")
+        # stashed for tests: button payloads are not introspectable
         st.session_state[ui["key"] + ":manifest_txt"] = txt
-        payload = csv_with_manifest(tab, txt)
-    st.download_button("Download filtered targets CSV (manifest in header)",
-                       payload.encode(), "explorer_targets.csv", "text/csv")
+        st.session_state[ui["key"] + ":manifest_fname"] = fname
+        c_dl2.download_button(fname, txt.encode(), fname, "text/plain")
 
 
 PANELS = [

@@ -528,24 +528,20 @@ if explorer.find_catalogs() and _glob.glob(os.path.join(explorer.CACHE_DIR, "*.p
     assert "live SIMBAD TAP" in man and "radius=1 arcsec" in man
     assert "ledger: data/master_exclusion.csv rows=" in man
     assert "cache_schema: v8" in man and "app_commit: " in man
-    # the manifest ships INSIDE the CSV as '#' comments — single file,
-    # exact pandas round-trip, header row first non-comment line
+    # plain CSV again (no comment header); manifest is its own README file
     import io
-    packed = explorer.csv_with_manifest(tab, man)
-    assert packed.splitlines()[0].startswith(
-        "# lines starting with # are the selection manifest")
-    first_data = next(l for l in packed.splitlines() if not l.startswith("#"))
-    assert first_data.startswith("ra,"), first_data[:40]
-    rt = pd.read_csv(io.StringIO(packed), comment="#")
+    plain = tab.to_csv(index=False)
+    assert not plain.startswith("#")
+    rt = pd.read_csv(io.StringIO(plain))          # no comment= needed
     assert rt.shape == tab.shape, (rt.shape, tab.shape)
     assert rt.columns.tolist() == tab.columns.tolist()
-    assert np.allclose(rt["feh_rgb"], tab["feh_rgb"].astype(float), atol=1e-6)
     assert (rt["source_id"].astype("Int64").fillna(-1).to_numpy()
             == tab["source_id"].astype("Int64").fillna(-1).to_numpy()).all()
-    # no separate manifest button any more
-    assert "Download selection manifest" not in open(
-        os.path.join(BASE, "explorer.py")).read()
-    print("OK  distance column + manifest-in-CSV round-trips exactly")
+    assert not hasattr(explorer, "csv_with_manifest")
+    stem = os.path.splitext(explorer.DEFAULT_CATALOG)[0]
+    assert at2.session_state[f"{ekey}:manifest_fname"] == \
+        f"README_{stem}.txt", at2.session_state[f"{ekey}:manifest_fname"]
+    print("OK  plain CSV + README_<catalog>.txt manifest download")
     print("OK  SIMBAD overlay propagates to dmod, e_feh, and the table")
 
     # the seeded selection is first in the table, with a detail line above it
