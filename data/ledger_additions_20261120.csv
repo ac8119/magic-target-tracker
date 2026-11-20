@@ -1,0 +1,4 @@
+name,ra,dec,category,detail,instrument
+ret2a_science,52.876107,-53.398011,MAGIC_Magellan,231014_MagE,MagE
+ret2b_science,54.179361,-53.898214,MAGIC_Magellan,231014_MagE,MagE
+MAGIC_166_n2,356.806460,-52.177332,MAGIC_Magellan,231205_MagE,MagE
